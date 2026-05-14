@@ -14,6 +14,31 @@ The default architecture is:
 Do not make Acumatica the primary save path unless the app intentionally uses a direct
 "Send to Acumatica" submit flow.
 
+## Offline Batch Create/Update Rule
+
+When the user asks for "offline batch", "save offline", "upload pending", "sync later",
+or similar wording for an Acumatica entity, use one local table for that entity by
+default.
+
+For example, if the app already syncs Acumatica customers into `customers`, then new
+local customers must also be saved into `customers`:
+
+- save new local rows into the same entity table with `Remote: "new"`
+- save edits to previously synced rows into the same entity table with `Remote: "dirty"`
+- select pending rows from that table where `Remote != "remote"`
+- call Acumatica from a centralized sync/upload action with `executeEntities`
+- on successful response, `upsert-merge` the response back into the same table with
+  `Remote: "remote"` and a sync timestamp
+
+Do not introduce a separate table such as `customerCreateQueue`, `customer-create-queue`,
+or `pendingCustomers` for the same entity unless the business process requires a
+different record shape that is not the entity cache. If a separate table is used, state
+the reason before implementing it.
+
+Inbound sync for the same table must normally use `upsert-merge`, not `delete-insert`,
+because `delete-insert` can remove local `Remote: "new"` or `Remote: "dirty"` rows that
+have not been sent yet.
+
 ## Remote Field
 
 Use `Remote` only for sync tracking:
@@ -24,6 +49,17 @@ Use `Remote` only for sync tracking:
 
 Do not overload `Remote` to mean "draft" or "not complete". Use separate business
 state fields for draft/readiness.
+
+Default missing `Remote` values deliberately. For existing cached rows that came from
+Acumatica before the app tracked `Remote`, default missing values to `remote` in pending
+selectors so old synced rows are not accidentally uploaded as new records.
+
+```sql
+WHERE COALESCE(json_extract(data, '$.Remote'), 'remote') != 'remote'
+```
+
+If the project stores wrapped data shapes, include the actual path used by the table,
+for example `json_extract(data, '$.data.Remote')`.
 
 ## Syncable State
 
@@ -71,3 +107,14 @@ Only one quote/order should be marked as the active order when the business requ
 single-order submission. If the selected quote is not active, ask whether to make it
 active, update sibling quotes, then submit.
 
+## Validation Checklist
+
+Before deploy, inspect generated YAML and confirm:
+
+- the local create/edit form saves to the same entity table used by inbound sync
+- new rows set `Remote: "new"` and edited synced rows set `Remote: "dirty"`
+- the pending datasource selects from that same table with `Remote != "remote"`
+- inbound sync uses `upsert-merge` for local-first tables that can contain unsynced rows
+- Acumatica response operations `upsert-merge` back into the same table with
+  `Remote: "remote"`
+- datasource SQL declares every table it references under `entities`

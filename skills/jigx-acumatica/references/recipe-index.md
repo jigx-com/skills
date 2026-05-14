@@ -3,7 +3,7 @@
 | Task | Read |
 | --- | --- |
 | Build REST PUT/GET functions or payloads | `acumatica-rest.md` |
-| Implement local-first sync or retry failed calls | `acumatica-sync.md` |
+| Implement local-first sync, offline batch create/update, `Remote` states, or retry failed calls | `acumatica-sync.md` |
 | Sync lookup/reference data, choose REST/OData, use `$expand` | `acumatica-lookups-expands.md` |
 | Upload files, attach PDFs, submit service orders | `acumatica-files-submit.md` |
 
@@ -31,4 +31,3 @@ Use these exact fields everywhere:
 
 The names must match config data, datasource projections, function path parameters,
 and action parameters.
-

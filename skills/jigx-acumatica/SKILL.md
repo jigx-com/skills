@@ -13,7 +13,8 @@ Acumatica-specific integration rules.
 
 1. Read `references/recipe-index.md`.
 2. Confirm whether the task is inbound lookup sync, local-first outbound sync, direct
-   submit, file upload, or retry/error handling.
+   submit, file upload, or retry/error handling. For any offline/batch create or
+   update, read `references/acumatica-sync.md` before designing tables or actions.
 3. Confirm REST versus OData. Prefer REST when possible.
 4. Confirm required `$expand` values before implementing lookups that need nested data.
 5. Keep Acumatica config casing exact: `acumaticaURL` and `acumaticaOdataURL`.
@@ -37,7 +38,9 @@ Acumatica-specific integration rules.
 - Never change `acumaticaURL` or `acumaticaOdataURL` casing.
 - Never assume nested fields are present without `$expand`.
 - Never send Jigx internal fields to Acumatica.
+- Never create a separate same-entity queue table for local-first create/update unless
+  the business flow explicitly needs a different table. Use the entity's local table
+  plus `Remote: "new" | "dirty" | "remote"` as the default.
 - Never lose failed commands. Use command queue retry or explicit error records.
 - Never overwrite local IDs in child records without replacing queued references when
   the queue still contains temporary IDs.
-
