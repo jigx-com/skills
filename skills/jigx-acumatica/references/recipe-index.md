@@ -3,7 +3,7 @@
 | Task | Read |
 | --- | --- |
 | Build REST PUT/GET functions or payloads | `acumatica-rest.md` |
-| Implement local-first sync, offline batch create/update, `Remote` states, or retry failed calls | `acumatica-sync.md` |
+| Implement local-first sync, offline batch create/update, queued writeback, dirty-aware refresh, `Remote` states, or retry failed calls | `acumatica-sync.md` |
 | Sync lookup/reference data, choose REST/OData, use `$expand` | `acumatica-lookups-expands.md` |
 | Upload files, attach PDFs, submit service orders | `acumatica-files-submit.md` |
 
@@ -21,6 +21,9 @@ Use the generic `jigx` skill for:
 - UI actions
 
 This skill only adds Acumatica-specific integration rules.
+
+For offline-capable Acumatica work, read `acumatica-sync.md` before designing local
+tables, queue rows, refresh actions, or REST functions.
 
 ## Case-Sensitive Config
 

@@ -41,8 +41,9 @@ needed for the task.
 - Do not hardcode secrets, tokens, org IDs, or customer-specific credentials.
 - Do not make external API calls from a primary save action unless the app explicitly
   uses a direct submit flow.
+- Do not blur read refresh and writeback boundaries; offline-capable writes should
+  drain from a visible user action.
 - Do not store device-local file paths as if they are portable across devices.
 - Do not use jig state as a substitute for stable screen inputs when saving parent or
   child records.
 - Do not assume generated YAML matches intent. Inspect it when behavior is unclear.
-

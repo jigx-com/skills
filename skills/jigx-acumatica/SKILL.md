@@ -38,6 +38,8 @@ Acumatica-specific integration rules.
 - Never change `acumaticaURL` or `acumaticaOdataURL` casing.
 - Never assume nested fields are present without `$expand`.
 - Never send Jigx internal fields to Acumatica.
+- Never build queued Acumatica payloads in the screen save action; pass identifiers
+  and build the body from local tables when the queue drains.
 - Never create a separate same-entity queue table for local-first create/update unless
   the business flow explicitly needs a different table. Use the entity's local table
   plus `Remote: "new" | "dirty" | "remote"` as the default.

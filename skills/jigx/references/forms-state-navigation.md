@@ -14,6 +14,29 @@ Primary form saves should usually:
 Do not call a remote API from the primary save action unless the app intentionally
 uses a direct submit flow.
 
+## Save Actions And Queued Sync
+
+For offline-capable flows, a screen save should persist facts, not remote payloads.
+
+```text
+form save
+  -> validate local business fields
+  -> upsert parent/child rows into local tables
+  -> mark rows dirty/pending
+  -> write or coalesce a minimal queue intent
+  -> clear dirty UI state
+  -> navigate or refresh local UI
+```
+
+Queue intent rows should contain identifiers, operation type, ordering, retry metadata,
+and a payload strategy such as `justInTime`. They should not contain full request
+bodies copied from the form. The eventual sync action should re-query the local tables
+so repeated local edits collapse into the latest state.
+
+Do not block child work only because the parent has not been synced yet. Generate
+stable local IDs for new parents and children, then replace them after the remote
+system returns real IDs.
+
 ## Dirty State And Discard Warning
 
 Use the standard jig state action pattern:
@@ -36,6 +59,10 @@ For parent-child flows:
 5. Save child rows with both `id` and `parentId`.
 
 This avoids losing parent IDs when a component `onChange` action changes jig state.
+
+When an item can be opened from more than one entry point, pass the active record IDs
+as jig inputs. Use solution state only for UI selection or global display state, not as
+the save contract for parent-child records.
 
 ## Create Flow
 
@@ -67,4 +94,3 @@ When copying a line item:
 `action.execute-entity` expects `data` to be an object. `action.execute-entities`
 expects an object or array of objects. If runtime says `data must be an object`, inspect
 generated YAML and confirm expressions resolve to an object, not a string or undefined.
-
