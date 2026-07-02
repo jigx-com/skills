@@ -45,10 +45,24 @@ Files require the remote parent ID. For locally created parents:
 1. save parent locally with temporary ID
 2. sync/create parent in Acumatica
 3. replace the temporary ID in local file rows with the remote Acumatica ID/NoteID
-4. map over file rows and upload one by one
+4. release file queue rows that were waiting for the parent
+5. map over file rows and upload one by one
 
 There is no batch media upload pattern. Use `executeEntities` map behavior to upload
 files one at a time.
+
+For offline-capable apps, use a file queue:
+
+- `notStarted` for uploadable files
+- `waitingParent` or `parentTmpId` while the parent or child still has a local ID
+- `uploading` while an upload call is active
+- `failed` for user-visible retry
+- `succeeded` when the upload is confirmed
+
+Drain data operations before file uploads. Parent create/update responses should update
+file queue parent IDs before the file queue starts. Recovery should inspect runtime
+sync status before retrying an `uploading` file; if the runtime status shows success,
+mark the file row succeeded instead of uploading again.
 
 ## PDF Attachment
 
@@ -74,4 +88,3 @@ When converting configured items into service order detail lines:
 
 Do not send internal-only generated codes to user-facing PDF output unless the business
 explicitly wants them shown.
-
