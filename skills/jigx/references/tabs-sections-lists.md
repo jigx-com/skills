@@ -47,6 +47,14 @@ users can accidentally tap them.
 
 ## Bottom Actions
 
+Core SDK `screen.bottomPanel()` creates a new conditional action group on every
+call. The runtime selects only the first group whose `when` is absent or true.
+Create one panel per screen and append its buttons with `panel.add`; do not create
+one unconditional panel per button. Set `numberOfVisibleActions: 2` when both main
+actions should be directly visible; additional children use the overflow menu.
+Validate the generated screen's selected group's `children`, not merely the
+presence of action labels anywhere in the output.
+
 Use bottom actions for the main task on the current screen. For PDF tabs, useful bottom
 actions are:
 

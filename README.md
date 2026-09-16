@@ -99,3 +99,25 @@ Use `jigx-acumatica` together with `jigx` when the app integrates with Acumatica
 REST/OData functions, `acuerp` tokens, `acumaticaURL` casing, lookup expands,
 local-first sync, command queue retry, file upload, PDF attachment, and service order
 submission patterns.
+
+## Verify generated solutions
+
+The Jigx skill includes a dependency-free checker for known mobile runtime
+contracts. Run it against the generated application before publishing:
+
+```sh
+node skills/jigx/scripts/check-runtime.mjs /path/to/solution/build/output.json
+node --test skills/jigx/scripts/check-runtime.test.mjs
+```
+
+The checker exits nonzero on errors and reports warnings separately. It catches
+undeclared state, hidden action groups, SQL binding mistakes, and local REST
+context/pagination errors. It does not validate live business data or prove that
+a device submission succeeded.
+
+For Acumatica integrations, combine the
+[screen KB and its companion skill](https://github.com/jigx-com/acumatica-kb-mcp)
+with actual app-populated lookup
+values, the generated request, authorized test writes and remote readback. The
+verification references explain what evidence is needed and how to preserve draft
+selections when a lookup source changes.

@@ -35,6 +35,13 @@ Use `app.script()` for logic that is too complex or fragile for inline JSONata:
 Keep the JavaScript function pure where possible. It should accept data and return a
 string or object without needing hidden global state.
 
+Core SDK `app.script()` and direct Strata deployment may publish script text verbatim.
+The mobile loader evaluates CommonJS code and requires `exports.__esModule` plus named
+function exports. Verify the generated/deployed artifact; when the CLI does not
+transpile, transpile ESM source at build time (for example TypeScript `transpileModule`
+with `ModuleKind.CommonJS`). Test that the generated script loads with the same exports
+contract, not only that its original ESM source imports successfully in Node.
+
 ## PDF Generation
 
 A robust PDF flow:
@@ -70,4 +77,3 @@ Before previewing or generating from local files:
 - handle empty file path
 - handle file path from another device
 - show a "not generated yet" placeholder or alert instead of failing the screen
-

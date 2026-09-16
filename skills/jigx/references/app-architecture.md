@@ -39,7 +39,8 @@ The usual build order is:
 4. Define screens and jigs.
 5. Assemble in `app.ts`.
 6. Generate JSON/YAML.
-7. Publish or deploy.
+7. Run generated runtime checks and the affected contract tests (`runtime-verification.md`).
+8. Publish within authorization, read back the artifact, and verify the affected device journey.
 
 ## Generated YAML
 

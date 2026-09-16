@@ -25,6 +25,21 @@ Use the standard jig state action pattern:
 
 Do not leave save actions that navigate away while the discard warning remains active.
 
+## Declaring Screen State
+
+Every key assigned by `setScreenState` (`action.set-jig-state`) must first exist in
+the owning screen's `state` configuration, for example:
+
+```ts
+screen.with({ state: { newId: { initialValue: null } } })
+```
+
+Declare temporary ID state on the screen where the action runs, including each
+screen that uses a shared create helper. Declare PDF generation IDs on the quote
+screen. The mobile runtime rejects undeclared keys. Check generated screen state
+against every state-setting action, then verify the same generated ID reaches the
+local save and navigation inputs.
+
 ## Inputs, Not Jig State, For IDs
 
 For parent-child flows:

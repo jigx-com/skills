@@ -86,3 +86,15 @@ Sort Acumatica dropdowns by the key users recognize:
 
 Add description fields where useful.
 
+
+## Verify Contact IDs Against the Writable Endpoint
+
+A GI can return plausible contact names with IDs that differ from REST Contacts.
+When Opportunity rejects a selected ContactID, compare the GI record with REST
+`Contact` and `BusinessAccount/{account}?$expand=Contacts` using the same login.
+Do not remap draft choices by display name. Use authoritative numeric ContactID,
+account, active state and person/contact type in the local lookup, and mark the
+source so old cached GI rows cannot be submitted before the refresh completes.
+REST contact collections return an array, unlike OData's `body.value`; use that
+array for normalization and pagination. Preserve obsolete selections in drafts
+and require explicit reselection rather than silently dropping the contact.
