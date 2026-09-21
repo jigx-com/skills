@@ -1,8 +1,11 @@
 # Datasources
 
-## Local Dynamic Tables
+## Local Tables And Storage Ownership
 
-Use local dynamic data for draftable, offline-capable records. A typical table stores:
+Choose device-local or cloud-shared storage by ownership; offline capability alone
+does not mean a draft belongs in a cloud-synchronized Dynamic Data table. Keep temporary
+editing copies device-local. The Acumatica skill documents the provider/table naming
+contract for externally owned ERP records. A typical table stores:
 
 - `id` as the row key
 - `data` as JSON
@@ -74,9 +77,27 @@ ORDER BY json_extract(data, '$.createdAt')
 
 Do not derive parent IDs from temporary jig state. Treat screen inputs as the contract.
 
+## Replacing child partitions
+
+`forRowsWithValues` is scalar equality, not an IN-list. An array of parent IDs is
+passed to SQLite as one bound value and can fail on device. For several confirmed
+parents, use scoped SQL with a JSON **string** parameter, for example:
+
+```sql
+DELETE FROM [children]
+WHERE json_extract(data, '$.parentId') IN
+  (SELECT value FROM json_each(@parentIds) WHERE type = 'text')
+```
+
+Then insert the mapped remote rows. Validate the complete response and mapping before
+replacement; an interrupted replacement must be safely repeatable. Include only
+parents whose local changes can be replaced, never unsent/dirty/deleted drafts or
+unrelated partitions. Test zero, one and multiple IDs, empty remote child collections,
+and retry using actual bound SQLite parameters. Do not teach a test harness to expand
+arrays when the mobile runtime does not.
+
 ## File Paths
 
 Device-local files are not portable across devices. Always guard preview and share
 flows against missing files. A file path saved on iOS may not exist on Android, and a
 file path saved before reinstall may no longer exist.
-

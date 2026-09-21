@@ -70,6 +70,20 @@ Strip Jigx-only fields before sending:
 For new records, strip fields Acumatica assigns when required by the endpoint. For
 updates, include the remote `id` or key fields needed to identify the record.
 
+Prefer one PUT containing a document header and its writable nested detail collections
+when the endpoint supports them. A new document does not need a separate header-only
+save just to obtain the ID for those nested rows; Acumatica associates them and returns
+their identities. `$expand` selects nested **response** data; it does not create the
+relationship. On update, use returned child IDs, omit IDs for new children, and use
+explicit `{id, delete: true}` rows for deletion where supported. Omission is not deletion.
+
+This combines one document, not an opportunity and all its linked quotes. Resolve the
+saved parent's key before creating a separate linked document. Keep native creation
+and workflow actions separate when the screen's KB requires their side effects; a
+first quote inheriting opportunity lines is a known example. Confirm endpoint mapping,
+payload size and actual create/update behavior before collapsing an existing queue.
+See [Acumatica 24R2: Create a Record](https://help-2024r2.acumatica.com/Wiki/ShowWiki.aspx?pageid=9d966d50-a0a1-4456-a9ff-1cc2159d48d4).
+
 ## Queries In Functions
 
 Preferred outbound functions receive only the record ID and re-query the local table
@@ -96,6 +110,10 @@ Every Acumatica REST function should have standard handlers for:
 
 Errors must be visible to the user through a retry/error surface or command queue
 status. Do not let failed submit actions disappear silently.
+Distinguish request-generation errors, server rejections and local persistence failures
+after HTTP success; missing HTTP status alone does not prove a network failure. Render
+an allowlisted message and correlation ID, never raw exception contexts or request
+headers, which may contain authentication secrets.
 
 
 ## Local REST Continuation
@@ -128,7 +146,9 @@ helpers are unavailable in guard result/when/parameter expressions. Compute cust
 validation in the called function's `output` (which has solution metadata), then
 return a typed result such as `{records, allowed}`. Use native JSONata in the
 outer guard and require `allowed = true` plus the expected records type. Keep
-error handling fail-closed. Guard table operations do have script metadata.
+error handling fail-closed. Guard operation **records** have script metadata; their
+conditions and configuration do not. The generic Jigx `runtime-verification.md` owns
+the boundary table, including request URLs and SQL bindings.
 Test the generated guard without registering solution functions, and test the
 called output with its functions registered.
 

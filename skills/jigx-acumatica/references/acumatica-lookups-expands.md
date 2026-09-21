@@ -53,6 +53,17 @@ Prefer fields in this order:
 - email: `LocationContact.Email`
 - address: location address fields on the location row
 
+When defaulting a newly selected customer, use its authoritative default location,
+contact and address relationships, validated against account scope and active state.
+Do not choose the first lookup row or infer a primary from its display name. On a
+customer change, invalidate dependent selections and reapply eligible defaults; keep
+related local documents aligned where the business relationship requires one account.
+Show that account once or read-only on the child rather than allowing conflicting edits.
+
+Cached inventory prices are estimates. Let Acumatica calculate contextual pricing and
+discounts unless the user explicitly chooses a manual override, and read back the result.
+Carry override flags when copying business values, but clear remote row identities.
+
 ## Dropdown Projections
 
 Project Acumatica values into simple datasource fields:

@@ -35,6 +35,11 @@ export function checkRuntime(app) {
   for(const [id,fn] of Object.entries(app.functions??{})) {
     if(fn.provider!=='DATA_PROVIDER_REST' || !fn.useLocalCall) continue;
     const base=`$.functions.${id}`;
+    for(const [path,value] of [[`${base}.url`,fn.url],[`${base}.continuation.url`,fn.continuation?.url]]) {
+      if(typeof value!=='string' || !value.startsWith('=')) continue;
+      for(const match of withoutStrings(value).matchAll(/\$([\w-]+)\.[\w-]+\s*\(/g)) if(namespaces.has(match[1]))
+        add('url-script-scope',path,'REST URL evaluation lacks solution script metadata. Use native expressions here.');
+    }
     const checkParameters=(params,path,definition=fn)=>{
       for(const [key,p] of Object.entries(params??{})) {
         if(String(definition.method).toUpperCase()==='GET' && p.location==='body') {
@@ -55,6 +60,21 @@ export function checkRuntime(app) {
         add('continuation-parameter',`${base}.continuation.parameters`,`Continuation replaces the map and drops ${key}; retain it or verify the intentional endpoint change.`,p.required&&!changedUrl?'error':'warning');
       }
     }
+    // Mobile supplies solution scripts to records, but not operation conditions/configuration.
+    walk(fn,(node,path)=>{
+      if(!node?.type?.startsWith('operation.'))return;
+      for(const [key,value] of Object.entries(node.forRowsWithValues??{})) {
+        if(value!==null && typeof value==='object') add('partition-value-shape',`${path}.forRowsWithValues.${key}`,'Partition equality requires a scalar. Use scoped SQL with serialized JSON for multiple parent IDs.');
+      }
+      for(const [key,value]of Object.entries(node)){
+        if(key==='records')continue;
+        walk(value,(expr,at)=>{
+          if(typeof expr!=='string'||!expr.startsWith('='))return;
+          for(const match of withoutStrings(expr).matchAll(/\$([\w-]+)\.[\w-]+\s*\(/g))if(namespaces.has(match[1]))
+            add('operation-script-scope',at,'Operation conditions and partition configuration lack solution script metadata. Use native expressions here.');
+        },`${path}.${key}`);
+      }
+    },base);
     for(const key of ['when','result','parameters']) walk(fn.guard?.[key],(value,path)=>{
       if(typeof value!=='string' || !value.startsWith('=')) return;
       for(const match of withoutStrings(value).matchAll(/\$([\w-]+)\.[\w-]+\s*\(/g)) if(namespaces.has(match[1]))
