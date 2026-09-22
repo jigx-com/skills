@@ -46,6 +46,25 @@ Inbound sync for the same table must normally use `upsert-merge`, not `delete-in
 because `delete-insert` can remove local `Remote: "new"` or `Remote: "dirty"` rows that
 have not been sent yet.
 
+`upsert-merge` alone does not protect a matching dirty row. Exclude local new,
+dirty, pending-delete and actively edited rows from inbound updates at the point
+of persistence, including each child table. Preserve their stable IDs and dirty
+markers until the matching outbound save is confirmed. A clean parent flag does
+not prove its children are safe to replace. For isolated temporary editing scopes,
+protect the saved aggregate while that scope is active without marking an untouched
+record as pending submission; release that protection on Save/Cancel or recovery
+of an abandoned editing scope.
+
+Bound document refresh by the product's chosen date field and window (for example,
+documents created in the last four weeks). Capture the cutoff once per refresh and
+reuse it across pages; fetch related rows for that parent set, not unrelated history.
+Creation-date windows intentionally exclude older documents modified recently. Use
+a modification watermark only when that is the requested policy. Reference lookups
+may need their own scope. A row absent from a page or date window is not evidence
+of remote deletion: retain local new/dirty records regardless of age, and perform
+any cache eviction or confirmed remote-deletion reconciliation separately with
+the same edit, child and pending-command protections.
+
 ## Remote Field
 
 Use `Remote` only for sync tracking:

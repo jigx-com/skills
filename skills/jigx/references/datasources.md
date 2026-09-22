@@ -66,6 +66,11 @@ record is saved but not visible until a full screen reload.
 
 ## Parent-Child Queries
 
+Project only the fields used by a list and load full records in their detail scope.
+Function queries should read only dependencies used by that function; loading a
+whole document cache into unrelated lookups increases parsing, rendering and debug
+serialization work even when the HTTP request itself is small.
+
 Use the parent ID passed through inputs:
 
 ```sql
