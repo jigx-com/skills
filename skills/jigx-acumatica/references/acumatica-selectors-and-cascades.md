@@ -112,7 +112,7 @@ selector values look like in practice. Test with those, not invented data.
 | --- | --- |
 | Time fields | Time only; the date part is dropped. A span that crosses midnight is rejected |
 | Span-checked fields such as working hours | Must fit inside their arrive and depart window |
-| Durations | A numeric value parses as `HHMM` digits; `7200` means `72:00`, not two hours. Send `"HH:MM"` on the screen path, or the enum's internal minutes value. Contract REST takes integer minutes |
+| Durations | A numeric value parses as `HHMM` digits; `7200` means `72:00`, not two hours. Send `"HH:MM"` only on an explicit server-side screen path, or the enum's internal minutes value. Contract REST takes integer minutes |
 | Equipment on a project | Governed by the project's `Restrict Equipment` flag on `PM301000`. Off: any active equipment commits. On: only equipment listed on that project's Equipment tab. The rejection names the project field, not the equipment |
 | Labour on a project | `Restrict Employees` works the same way |
 | Any screen data | Branch-scoped. A lookup read may see a different population than the write will accept |

@@ -11,15 +11,40 @@ Acumatica exposes three usable channels. Pick by what the job is, not by habit.
 | Job | Channel | Why |
 | --- | --- | --- |
 | Sync a list to the device (customers, open orders, price list, any lookup with many rows) | Generic Inquiry, exported over OData | Built for bulk paging and delta pushdown; carries `LastModifiedDateTime` on the `JIGX*` inquiries |
-| Read one record, create or update a record, write inline detail lines, run a screen action | Screen-based API (SOAP) | Follows the screen's own logic; the only channel that runs workflow actions as the screen does |
-| An entity with no usable screen, a field a screen will not expose, or a simple single-record read/write | Contract-based REST | Self-describing through Swagger; the fallback, never the bulk channel |
+| Understand a screen, discover field/view/action definitions, or configure Acumatica from an agent/server process | Screen SOAP/UI protocol | Follows the screen's own logic and exposes the definitions needed to build GIs, endpoints, and mappings; not executable by Jigx mobile |
+| A mobile-supported single-record read/write, detail write, or entity action | Contract-based REST | Self-describing through Swagger; use screen probe facts to create or choose the right endpoint when `Default` is insufficient |
+
+## SOAP/UI Probes Versus Jigx Mobile Runtime
+
+Acumatica's screen SOAP/UI protocol is an agent-time discovery and configuration
+instrument, not a Jigx mobile runtime target.
+
+- Jigx mobile cannot execute SOAP, WSDL, or SOAP-session calls. Do not generate mobile
+  functions or actions that post SOAP envelopes or depend on SOAP sessions from the
+  device.
+- Use SOAP/UI probes to understand screen definitions and behavior: containers, views,
+  DAC field names, actions, required fields, workflow affordances, and the shape needed
+  to create Generic Inquiries, custom REST endpoints, or customization packages.
+- Map those probe results into mobile-supported surfaces: Generic Inquiry/OData for
+  list and lookup sync, contract REST endpoints for record reads and writes, supported
+  file/action endpoints, or an explicitly available server-side bridge when a required
+  workflow has no REST/GI equivalent.
+- An AI agent running outside the mobile app may use SOAP/UI directly while discovering
+  or configuring Acumatica: adding endpoints, creating Generic Inquiries, importing or
+  publishing customizations, and configuring screens. Treat these as admin-time
+  operations: name the instance and environment, get explicit agreement for mutations,
+  keep sessions bounded, and log out on failure too.
 
 Rules of thumb:
 
 - Many rows go through a Generic Inquiry. The screen and REST layers are not built for
   bulk and burn API load when used that way.
-- One record, an update, or an action goes through the screen path or REST.
-- Reach for REST only when the screen or inquiry path cannot do the job.
+- One record, an update, or an action goes through REST for Jigx mobile. Use the screen
+  SOAP path only from an agent/server process that is explicitly part of the integration
+  architecture.
+- When REST is missing a field or action, use SOAP/UI facts to create or choose a custom
+  endpoint, create a supporting Generic Inquiry, or identify that a server-side bridge
+  is required.
 - A data-entry screen export can regress to `<NEW>` placeholder rows when the schema
   refreshes, and it cannot push a filter or delta cut to the source. Prefer an inquiry
   for every list read; consider creating one before settling for a screen export.
@@ -57,8 +82,9 @@ Rules of thumb:
 | The screen knowledge base | The release's built-in filters, cascades, defaults, workflow | The tenant's customizations or data; see `acumatica-screen-logic.md` |
 
 Combo values live in none of the schema sources. The UI screen API is the bounded,
-metadata-only exception; every data read and write still runs on the screen path,
-inquiry, or REST.
+metadata-only exception. Jigx mobile reads and writes still run through Generic
+Inquiries/OData, contract REST, or an explicit server-side bridge; screen SOAP is only
+for agent/server-side probing, configuration, or bridge code.
 
 ## Session And Licence Discipline
 

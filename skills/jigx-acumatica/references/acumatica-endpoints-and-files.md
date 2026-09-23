@@ -64,7 +64,7 @@ the classic case.
 
 Not every screen grounds. Some CRM screens return an empty schema through the API. Say
 so, and offer to specify the fields explicitly, use a different screen, or build the
-entity through the screen path instead.
+entity through an explicit server-side screen bridge instead.
 
 ## Attaching Files To A Record
 

@@ -1,6 +1,6 @@
 ---
 name: jigx-acumatica
-description: Use when building Jigx apps that integrate with Acumatica ERP, including probing an instance and choosing between generic inquiries, the screen API and contract REST, reading a screen's built-in logic and reconciling it with the customer's instance, selector and cascade rules, on-demand and delta reads, custom endpoint creation, REST and OData functions, Acumatica config values, acuerp access tokens, .value payload wrappers, lookup sync, expand selection, local-first sync, command queue retry, file uploads, PDF attachment, and service order submission.
+description: Use when building Jigx apps that integrate with Acumatica ERP, including probing an instance, using SOAP/UI probes to understand screens, choosing between generic inquiries and contract REST for mobile, reading a screen's built-in logic and reconciling it with the customer's instance, selector and cascade rules, on-demand and delta reads, custom endpoint creation, REST and OData functions, Acumatica config values, acuerp access tokens, .value payload wrappers, lookup sync, expand selection, local-first sync, command queue retry, file uploads, PDF attachment, and service order submission.
 ---
 
 # Jigx Acumatica
@@ -13,9 +13,11 @@ Acumatica-specific integration rules.
 
 1. Read `references/recipe-index.md`.
 2. For a new integration, read `references/acumatica-discovery.md` first: find the
-   customer's release from the instance build, pick the channel by job (inquiry for
-   lists, screen API for records and actions, contract REST as the fallback), and
-   keep every session bounded by a logout.
+   customer's release from the instance build, pick the channel by job, and keep every
+   session bounded by a logout. SOAP/UI probes are for agent-side discovery and
+   Acumatica configuration only; Jigx mobile cannot execute SOAP calls and must use
+   the discovered screen facts through Generic Inquiries/OData, contract REST, or an
+   explicitly provided server-side bridge.
 3. Before designing anything on a screen, read `references/acumatica-screen-logic.md`
    and use `jigx-acumatica-kb`. Reconcile with the live instance when a connection
    exists, and treat customer-added and unresolved fields as schema only.
@@ -38,8 +40,9 @@ Acumatica-specific integration rules.
 ## Reference Map
 
 - `references/recipe-index.md` - when to read each Acumatica reference.
-- `references/acumatica-discovery.md` - probing an instance, the three channels by
-  job, release from build, session and licence discipline, reading Acumatica errors.
+- `references/acumatica-discovery.md` - probing an instance, SOAP/UI probe boundaries
+  for Jigx mobile, the three channels by job, release from build, session and licence
+  discipline, reading Acumatica errors.
 - `references/acumatica-screen-logic.md` - what the screen knowledge base carries,
   the release rule, reconciling with the live instance, provenance, what it cannot know.
 - `references/acumatica-selectors-and-cascades.md` - the stored-column contract,
@@ -65,6 +68,10 @@ Acumatica-specific integration rules.
 - Never guess or default the Acumatica release. Derive it from the build or ask; a
   release the knowledge base does not cover is designed from the live schema, never
   from a neighbouring release.
+- Never generate Jigx mobile code that executes SOAP, WSDL calls, or Acumatica SOAP
+  sessions. Use SOAP/UI probes to understand and configure Acumatica, then implement
+  the mobile integration with Generic Inquiries/OData, contract REST, files/actions,
+  or an explicitly available server-side bridge.
 - Never sync a large list through the screen API or contract REST. Lists go through
   a Generic Inquiry.
 - Never leave an Acumatica session open. Login, work, logout, on failure too.
