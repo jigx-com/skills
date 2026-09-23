@@ -2,7 +2,7 @@
 
 | Task | Read |
 | --- | --- |
-| Start a new integration, choose inquiry versus screen versus REST, find the release, or read an Acumatica error | `acumatica-discovery.md` |
+| Start a new integration, choose GI/OData versus REST, understand SOAP/UI probe boundaries, find the release, or read an Acumatica error | `acumatica-discovery.md` |
 | Design a form, lookup, save, or action on a screen; reconcile with the customer's instance | `acumatica-screen-logic.md` |
 | Feed a selector, find or prove a cascade, diagnose a rejected value, harden a write, handle time, duration, equipment, or workflow values | `acumatica-selectors-and-cascades.md` |
 | Declare a list read: inquiry, delta sync, row identity, on-demand or parent-driven parameters, the row cap | `acumatica-reads-and-sync-contract.md` |
