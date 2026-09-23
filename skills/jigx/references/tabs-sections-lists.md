@@ -41,9 +41,10 @@ and simplify the tag source to one expression or one tag item.
 
 ## Header Actions
 
-Use header actions for less frequent or risky actions such as reset, sync, force sync,
-or retry. Keep destructive bottom actions away from high-frequency primary actions when
-users can accidentally tap them.
+Use a list or section header for adding items to that collection when the chosen UX
+calls for it; reserve form Save for accepting the editing scope. Avoid adding multiple
+Save/Sync/Refresh controls that perform overlapping work. Keep destructive actions
+away from high-frequency primary actions when users can accidentally tap them.
 
 ## Bottom Actions
 
@@ -67,4 +68,5 @@ Show user feedback after long-running actions, especially generation actions.
 
 Use swipe actions for row-level operations such as copy and delete. Confirm destructive
 or duplicating actions when accidental use would be costly.
-
+Give each swipe a visible label, a supported icon and contrasting foreground/background
+colors; verify the rendered result in the target app, not just the configured icon name.

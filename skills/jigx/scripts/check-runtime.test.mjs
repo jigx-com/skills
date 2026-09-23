@@ -43,3 +43,21 @@ test('literal script names and datasource paths do not count as executed express
  assert.deepEqual(checkRuntime(app),[]);
  f.guard.result='=$custom.allow("quoted")';assert.deepEqual(codes(app),['guard-script-scope']);
 });
+
+test('URL and operation configuration reject script calls but records accept them',()=>{
+ const f=fn();f.url='=$custom.url(@ctx.parameters.base)';
+ f.continuation={url:'=$custom.next(@ctx.response.body)'};
+ f.operations=[{type:'operation.upsert-merge',when:'=$custom.ready()',records:'=$custom.rows(@ctx.response.body)'}];
+ const app={functions:{read:f},scripts:{expressions:{'custom.js':''}}};
+ assert.deepEqual(codes(app),['url-script-scope','url-script-scope','operation-script-scope']);
+ f.url='=@ctx.parameters.base & "/records"';f.continuation.url='=@ctx.response.body.next';f.operations[0].when='=@ctx.response.status=200';
+ assert.deepEqual(codes(app),[]);
+ f.operations.push({type:'operation.execute-sql',tables:['items'],statements:[{statement:'DELETE FROM items WHERE id=@id',parameters:{id:'=$custom.id()'}}]});
+ assert.deepEqual(codes(app),['operation-script-scope']);
+});
+test('literal partition arrays are rejected while scalar values remain valid',()=>{
+ const f=fn();f.operations=[{type:'operation.delete-insert',table:'items',records:'=@ctx.response.body',forRowsWithValues:{parentId:['a','b']}}];
+ assert.deepEqual(codes({functions:{read:f}}),['partition-value-shape']);
+ f.operations[0].forRowsWithValues.parentId='=@ctx.parameters.id';
+ assert.deepEqual(codes({functions:{read:f}}),[]);
+});

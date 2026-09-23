@@ -2,8 +2,9 @@
 
 ## JSONata
 
-Keep expressions readable. If an expression becomes hard to inspect, move logic into a
-JavaScript function.
+Keep expressions readable. Where solution script metadata is available, move complex
+logic into a JavaScript function. Check the execution boundary in
+`runtime-verification.md` before doing this for REST configuration.
 
 Common rules:
 
@@ -44,6 +45,11 @@ Separate:
 Do not use hidden required fields that make a save button disabled without explaining
 the missing requirement to the user.
 
+For optional boolean controls, explicitly set `isRequired: false`: an unchecked
+manual-price/discount choice is valid. Do not make optional notes required because a
+separate description is required. Display prices from the selected datasource's actual
+shape, but distinguish cached estimates from server-confirmed pricing.
+
 ## Formatting
 
 Use native formatting configurations where available, for example currency formatting
@@ -54,4 +60,3 @@ to zero instead of showing "not set".
 
 Use the SDK icon search MCP when an icon name is uncertain. Broken icons should be
 treated as defects. Prefer explicit, known SDK icon names over guessed names.
-

@@ -6,7 +6,7 @@ Primary form saves should usually:
 
 1. Snapshot form/component values.
 2. Validate required business fields.
-3. Save one row to the local dynamic table.
+3. Commit the accepted record and its children to the chosen local storage.
 4. Set user-visible status or progress.
 5. Disable discard warning.
 6. Navigate back or refresh the current workspace.
@@ -14,6 +14,12 @@ Primary form saves should usually:
 Do not call a remote API from the primary save action unless the app intentionally
 uses a direct submit flow.
 
+For a tabbed document with an explicit final Save/Cancel, edit an isolated temporary
+copy, including child rows. A child Save accepts changes into the parent's editing
+copy; the final parent Save validates and commits the aggregate atomically before
+queuing any authorized submission. Back/Cancel discards that editing scope. Navigation
+must not create saved business records or trigger submission. If the product instead
+requires header-first saving or autosave, implement that explicit contract.
 ## Save Actions And Queued Sync
 
 For offline-capable flows, a screen save should persist facts, not remote payloads.
@@ -68,7 +74,7 @@ local save and navigation inputs.
 For parent-child flows:
 
 1. Generate the parent ID before opening the parent workspace.
-2. Save the parent row with that ID.
+2. Keep that ID in the parent's editing copy; persist the canonical row at its save boundary.
 3. Pass the parent ID to child tabs and child create/edit screens as an input.
 4. Generate child IDs before navigating to child create screens.
 5. Save child rows with both `id` and `parentId`.
@@ -102,7 +108,8 @@ When copying a line item:
 
 - offer copy first, copy last, or start clean when that improves user flow
 - generate a new item ID before opening the editor
-- copy business fields only
+- copy business fields only; clear remote row IDs and revision tokens, including on
+  every copied child. Identical inventory or product codes do not identify the same row.
 
 ## Action Data Shape
 

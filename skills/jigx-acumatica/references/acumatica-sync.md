@@ -66,6 +66,24 @@ Inbound sync for the same table must normally use `upsert-merge`, not `delete-in
 because `delete-insert` can remove local `Remote: "new"` or `Remote: "dirty"` rows that
 have not been sent yet.
 
+`upsert-merge` alone does not protect a matching dirty row. Exclude local new,
+dirty, pending-delete and actively edited rows from inbound updates at the point
+of persistence, including each child table. Preserve their stable IDs and dirty
+markers until the matching outbound save is confirmed. A clean parent flag does
+not prove its children are safe to replace. For isolated temporary editing scopes,
+protect the saved aggregate while that scope is active without marking an untouched
+record as pending submission; release that protection on Save/Cancel or recovery
+of an abandoned editing scope.
+
+Bound document refresh by the product's chosen date field and window (for example,
+documents created in the last four weeks). Capture the cutoff once per refresh and
+reuse it across pages; fetch related rows for that parent set, not unrelated history.
+Creation-date windows intentionally exclude older documents modified recently. Use
+a modification watermark only when that is the requested policy. Reference lookups
+may need their own scope. A row absent from a page or date window is not evidence
+of remote deletion: retain local new/dirty records regardless of age, and perform
+any cache eviction or confirmed remote-deletion reconciliation separately with
+the same edit, child and pending-command protections.
 For larger parent-child entities, prefer normalized local tables over one large cached
 JSON document when users edit children offline. REST functions can assemble the
 Acumatica JSON shape from normalized local rows at sync time.
@@ -200,6 +218,20 @@ tables and queued commands.
 Failed REST calls remain in the command queue as failed commands. A retry action should
 requeue failed commands for the current business record in command order.
 
+For native actions that create linked records asynchronously, persist intent and the
+pre-action identity/revision snapshot before sending. Store the returned status URL
+and local-to-remote mapping durably. A 202 acknowledges acceptance, not completion:
+poll the documented status resource with bounded attempts and resume after restart.
+Only forward authentication to a validated status URL under the configured endpoint.
+
+After a lost response, reconcile before repeating a create. An unseen child number or
+primary flag alone is insufficient under concurrent creation: require an unambiguous
+parent relationship plus a matching baseline/snapshot or a server-supported correlation
+key. Preserve local edits while adopting remote identity. An uncertain create with no
+provable match stays blocked for reconciliation; absence alone is not proof it failed.
+Use an approved external-reference field for correlation when available; a marker in
+user-visible notes is a product tradeoff, not a universal integration requirement.
+
 Do not ask users to select arbitrary individual failed calls unless the business flow
 can safely retry them out of order. Usually, retry all failed calls for the record in
 queue order.
@@ -242,9 +274,14 @@ but show guidance such as "Run Sync again when the connection is stable."
 
 REST execute-action `onSuccess` confirms local queue acceptance, not server success.
 Acknowledge it as a send request. Derive completion from a successful REST response
-persisting the remote ID and `Remote: "remote"`. For live queue status, watch
+persisting the remote ID and `Remote: "remote"`. For a multi-document submission,
+the parent may already be remote while a child or readback still failed: derive overall
+completion from the whole submission, including required primary actions and readback.
+Show a completion result/timestamp after retry instead of merely removing the failed
+row. For live queue status, watch
 `_commandQueue`, filter by provider, `type='function'`, function ID, and
-`json_extract(payload,'$.parameters.id')`. States are queued, processing, waiting,
+the command's declared parent reference as well as `parameters.id` (a quote command's
+`id` may identify the child). States are queued, processing, waiting,
 and failed; a successful command is removed. Do not let obsolete failed commands
 override a newer confirmed save with no current error. Never display raw payloads
 or function execution contexts; they may contain authentication data.

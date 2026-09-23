@@ -12,7 +12,8 @@ Copy the dependency-free script into the project to include it in repeatable loc
 verification. It fails on known runtime-contract errors and reports warnings:
 undeclared state, unreachable action groups, screen SQL `$name` instead of `@name`,
 GET bodies, function defaults using screen datasources, incomplete continuation
-maps, and custom script calls in guard evaluation. Review intentional exceptions
+maps, literal non-scalar partition values, and custom script calls in guard, URL and
+operation-configuration evaluation. Review intentional exceptions
 against the installed runtime; do not suppress all findings.
 
 Also inspect dropdown value projections, local/cloud table ownership, datasource
@@ -25,7 +26,20 @@ and installed runtime code; a TypeScript cast is not evidence of a supported API
 Use sanitized real response fixtures preserving primitive types, nesting, missing
 values and empty arrays. Test generated expressions with exactly the globals and
 error behavior available at their evaluation point. Do not register helpers in a
-test of a mobile guard that lacks solution script metadata. A JavaScript throw may
+test of a mobile guard that lacks solution script metadata. In the inspected local
+REST runtime, these boundaries differ:
+
+| Evaluation point | Solution scripts available? |
+| --- | --- |
+| Guard `when`, `result`, parameters | No |
+| Request `url`, including continuation URL | No |
+| Table-operation conditions, partition selectors, SQL configuration/parameters | No |
+| Function output/input transform and table-operation `records` | Yes |
+
+Use native JSONata at script-free boundaries; prepare complex results at a supported
+boundary and consume typed output. Recheck the installed runtime when it changes.
+Use real SQLite binding behavior for partition operations (see `datasources.md`).
+A JavaScript throw may
 be caught by expression evaluation and become null: it is not a reliable substitute
 for a fail-closed guard before a remote write. Test that failure prevents HTTP.
 
@@ -39,6 +53,8 @@ Exercise the affected flow in the specified app (e.g. Frontline):
 3. Submit from the visible action and observe queued, processing, failure/success.
 4. Read the remote record back and confirm the local remote id/state. Verify failed
    sends preserve work and retries of uncertain creates cannot duplicate records.
+5. Verify visible completion after retry. A failed row disappearing is insufficient
+   feedback; distinguish queued, remote saved, readback pending and complete states.
 
 Use available debug/UI tools autonomously. If the phone cannot be operated by tools,
 prepare all independent verification and request only the remaining device action.
