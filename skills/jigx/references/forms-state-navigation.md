@@ -20,6 +20,28 @@ copy; the final parent Save validates and commits the aggregate atomically befor
 queuing any authorized submission. Back/Cancel discards that editing scope. Navigation
 must not create saved business records or trigger submission. If the product instead
 requires header-first saving or autosave, implement that explicit contract.
+## Save Actions And Queued Sync
+
+For offline-capable flows, a screen save should persist facts, not remote payloads.
+
+```text
+form save
+  -> validate local business fields
+  -> upsert parent/child rows into local tables
+  -> mark rows dirty/pending
+  -> write or coalesce a minimal queue intent
+  -> clear dirty UI state
+  -> navigate or refresh local UI
+```
+
+Queue intent rows should contain identifiers, operation type, ordering, retry metadata,
+and a payload strategy such as `justInTime`. They should not contain full request
+bodies copied from the form. The eventual sync action should re-query the local tables
+so repeated local edits collapse into the latest state.
+
+Do not block child work only because the parent has not been synced yet. Generate
+stable local IDs for new parents and children, then replace them after the remote
+system returns real IDs.
 
 ## Dirty State And Discard Warning
 
@@ -58,6 +80,10 @@ For parent-child flows:
 5. Save child rows with both `id` and `parentId`.
 
 This avoids losing parent IDs when a component `onChange` action changes jig state.
+
+When an item can be opened from more than one entry point, pass the active record IDs
+as jig inputs. Use solution state only for UI selection or global display state, not as
+the save contract for parent-child records.
 
 ## Create Flow
 

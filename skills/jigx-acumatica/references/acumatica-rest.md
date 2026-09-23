@@ -95,6 +95,11 @@ when the command runs. This avoids stale screen snapshots:
 4. function executes
 5. operations update local data
 
+For queued sync, prefer this even more strongly: pass the queue operation ID plus the
+business record IDs, then query all required local tables inside the REST function.
+Build the Acumatica body just in time from the latest local rows. This lets repeated
+local edits collapse into one current payload.
+
 ## Error Handlers
 
 Every Acumatica REST function should have standard handlers for:
@@ -115,6 +120,14 @@ after HTTP success; missing HTTP status alone does not prove a network failure. 
 an allowlisted message and correlation ID, never raw exception contexts or request
 headers, which may contain authentication secrets.
 
+For Acumatica validation or server errors, parse the response body instead of showing a
+raw status code. Store both:
+
+- a concise user-facing message and repair hint
+- the technical body/message for support
+
+For network failures, show a stable retry message and keep the queue row retryable.
+Do not continue draining dependent commands after a failed write.
 
 ## Local REST Continuation
 
