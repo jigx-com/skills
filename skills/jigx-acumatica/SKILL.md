@@ -20,6 +20,10 @@ Acumatica-specific integration rules.
 5. Keep Acumatica config casing exact: `acumaticaURL` and `acumaticaOdataURL`.
 6. Use `accessToken` with type/value `acuerp`; do not hardcode access tokens.
 7. Preserve local-first behavior unless the app explicitly uses direct submit.
+8. Before designing a new screen integration or changed lookup/submit path, use
+   `jigx-acumatica-kb` and read `references/integration-verification.md`. Resolve
+   runtime-only selectors on the instance and test actual app-populated values
+   through the generated request and remote readback.
 
 ## Reference Map
 
@@ -31,6 +35,9 @@ Acumatica-specific integration rules.
   `$expand`, force sync, dropdown fields.
 - `references/acumatica-files-submit.md` - file uploads, PDF attachments, service
   order submit patterns.
+
+- `references/integration-verification.md` - test app-populated data through the
+  generated request, authorized live writes and remote readback.
 
 ## Guardrails
 

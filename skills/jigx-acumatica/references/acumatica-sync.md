@@ -1,18 +1,25 @@
 # Acumatica Sync
 
-## Local-First Default
+## Device-Local Acumatica Storage
 
-The default architecture is:
+For device-local drafts and caches whose remote owner is Acumatica, use unprefixed
+table names and the local provider. `default/*` identifies Jigx Dynamic Data: even REST result operations or
+local-provider actions on these names generate cloud synchronization commands.
+Use local SQLite datasources, `.local(table, 'save')` execute actions, and
+`provider: 'DATA_PROVIDER_LOCAL'` plus entity/method on submit-form actions.
+Keep intentional Jigx-shared data in Dynamic Data; determine ownership per table
+rather than moving every table to local storage.
 
-1. Save locally.
-2. Mark sync state.
-3. Let a centralized sync or submit action select pending records.
-4. Call Acumatica.
-5. Merge responses locally.
-6. Mark records remote/synced.
+When correcting an existing default-table implementation, migrate existing rows
+before sync without changing IDs. Preserve draft/signature/file data and storage
+metadata. Write an idempotent migration marker after all copies. Block submission
+until the marker exists and return a visible not-ready result from preflight. Do not
+rely on a false REST `when` or a thrown expression: either can become a successful
+no-op in the runtime. Archive only obsolete Dynamic Data commands before removing
+those exact commands; preserve REST commands and in-flight work.
 
-Do not make Acumatica the primary save path unless the app intentionally uses a direct
-"Send to Acumatica" submit flow.
+The intended flow is local save, pending-state tracking, explicit Acumatica submit,
+then merge the server response into the same local table.
 
 Separate the lifecycle into explicit blocks:
 
@@ -163,18 +170,15 @@ before syncing.
 Only sync records that satisfy business readiness. For example, a parent order may
 require minimum header fields and at least one line item.
 
-## Parent-Child Replacement
+## Stable Local And Remote Keys
 
-When Acumatica assigns the real parent key:
+Preserve the local parent ID and store the returned remote key separately when
+children and queued commands already use that local ID. Build API references from
+the stored remote key after the parent save succeeds.
 
-1. sync the parent first
-2. read the remote key from the response
-3. run find-replace operations to update child rows from the temporary local ID/key to
-   the remote key
-4. sync children after their references have been updated
-
-If queued commands still reference temporary IDs, include command queue replacement
-when required.
+If an existing app deliberately replaces local keys, update child rows and queued
+references together before allowing dependent writes. Never replace only the parent
+row ID and leave children or retry commands pointing at the old ID.
 
 When Acumatica can accept parent plus children in one aggregate REST call and returns
 enough child data to correlate safely, prefer that single call. Keep files separate
@@ -234,6 +238,16 @@ local rows and rebuild the payload just in time.
 
 Network errors should be user friendly. Store the raw technical message separately,
 but show guidance such as "Run Sync again when the connection is stable."
+## Send Feedback
+
+REST execute-action `onSuccess` confirms local queue acceptance, not server success.
+Acknowledge it as a send request. Derive completion from a successful REST response
+persisting the remote ID and `Remote: "remote"`. For live queue status, watch
+`_commandQueue`, filter by provider, `type='function'`, function ID, and
+`json_extract(payload,'$.parameters.id')`. States are queued, processing, waiting,
+and failed; a successful command is removed. Do not let obsolete failed commands
+override a newer confirmed save with no current error. Never display raw payloads
+or function execution contexts; they may contain authentication data.
 
 ## Direct Submit Flow
 

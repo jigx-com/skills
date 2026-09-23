@@ -10,6 +10,7 @@ Use this index to load the smallest reference needed for the task.
 | Add tabs, sections, list items, header actions, bottom actions, swipe actions | `tabs-sections-lists.md` |
 | Add photos, signatures, local files, HTML/PDF generation, JS functions | `media-pdf-javascript.md` |
 | Work with JSONata, validation, dropdowns, formatting, icons | `jsonata-validation-formatting.md` |
+| New solutions, form/sync changes, and prepublish verification | `runtime-verification.md` |
 
 ## Core Principles
 

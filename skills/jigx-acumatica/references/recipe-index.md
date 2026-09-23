@@ -6,6 +6,7 @@
 | Implement local-first sync, offline batch create/update, queued writeback, dirty-aware refresh, `Remote` states, or retry failed calls | `acumatica-sync.md` |
 | Sync lookup/reference data, choose REST/OData, use `$expand` | `acumatica-lookups-expands.md` |
 | Upload files, attach PDFs, submit service orders | `acumatica-files-submit.md` |
+| New integrations and app-equivalent live contract tests | `integration-verification.md` |
 
 ## Generic Dependency
 

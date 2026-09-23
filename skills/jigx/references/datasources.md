@@ -45,6 +45,18 @@ Use the projected field as the dropdown `value` when Jigx needs to match selecte
 items. If the value only exists inside raw JSON and is not selected as a field, selected
 values may not display correctly.
 
+## Binding And Dropdown Values
+
+Screen SQLite query parameters use `@name`, with the corresponding name in
+`queryParameters`. A SQL statement using `$name` may prepare successfully in SQLite
+while failing the mobile binding contract; test binding through the generated
+screen datasource, not just SQLite syntax.
+
+For a dropdown, project the selection key as a top-level `value` with the same
+primitive type as `initialValue`. Bind its item value to `@ctx.current.item.value`;
+titles may still use `@ctx.current.item.data.Description`. Verify selection survives
+closing/reopening and the dependent query receives the selected key.
+
 ## Search
 
 Search dropdowns use the same pattern as lists:

@@ -22,6 +22,11 @@ needed for the task.
 6. When a new pattern is learned, update the relevant reference before or with the
    implementation.
 
+7. For a new solution or changed form/sync/submit journey, read
+   `references/runtime-verification.md` before implementation. Run its generated
+   checker before publishing and verify the affected target-app journey. Compilation
+   alone does not establish working behavior.
+
 ## Reference Map
 
 - `references/recipe-index.md` - when to read each reference.
@@ -35,6 +40,9 @@ needed for the task.
   scripts, share/regenerate flows.
 - `references/jsonata-validation-formatting.md` - JSONata, validation, formatting,
   dropdowns, icons, and field conventions.
+
+- `references/runtime-verification.md` - generated checks, device journeys, debug
+  evidence and verification claims.
 
 ## Guardrails
 
