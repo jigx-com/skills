@@ -21,14 +21,14 @@ reads device-local tables; naming a Dynamic Data table in its SQL does not make 
 table synchronize. Keep externally owned transactional drafts in their chosen local
 tables rather than moving them to Dynamic Data merely to support offline use.
 
-A screen datasource can trigger Dynamic Data synchronization when first used; a global
-datasource can bring its declared tables in on solution load. For small shared settings
-that must be present before the device goes offline, prefetch the required entities
-with a Dynamic Data `sync-entities` action at a suitable entry point, such as the index
-`onLoad`. Do not assume that `onLoad` runs again for an existing installation after a
-solution update: give newly introduced required tables an on-demand or version-aware
-recovery path. Verify the generated provider and entity names, then test first load,
-update, relaunch, and offline use on the target app.
+A screen datasource starts Dynamic Data synchronization when first used; a global
+datasource starts it on solution load. For small shared settings needed offline before
+their screen is opened, prefetch the entities with a Dynamic Data `sync-entities`
+action in the solution's `onLoad`. This runs when the solution is first loaded.
+Use solution- or jig-level `onAppActivated` for work when the phone app returns from
+background or inactive; it does not fire on initial launch. `onFocus` applies when a
+jig receives focus through navigation. Verify the provider, entity names, and offline
+rows on the target app.
 
 ## Local-First Transactional Tables
 
@@ -101,7 +101,7 @@ record is saved but not visible until a full screen reload.
 
 Keep read refresh and writeback separate.
 
-- Screen `onLoad` may prefetch bounded Dynamic Data needed for offline use.
+- Solution `onLoad` may prefetch bounded Dynamic Data needed for offline use.
 - Screen `onFocus` may run small read checks when the app intentionally shows
   "new data available" indicators.
 - Pull-to-refresh or a refresh button may fetch latest read data, but should not drain
