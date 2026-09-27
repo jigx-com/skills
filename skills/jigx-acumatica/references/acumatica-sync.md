@@ -213,6 +213,21 @@ parent response:
 Never overwrite a temp ID in one table without replacing references in dependent
 tables and queued commands.
 
+## Dependent Offline Creates
+
+When one new record requires another record's Acumatica ID, save the related local
+records with stable IDs and queue their writes in dependency order. For example, an
+offline opportunity for a new customer can require customer creation, contact
+creation, primary-contact assignment, and then opportunity creation. Each queued
+function reads the preceding step's **persisted** Acumatica ID when it runs. Do not
+use an earlier queued action's immediate output to build a later request, and never
+send a temporary local customer ID to Acumatica as a remote relationship key.
+
+Stop dependent commands when a create fails or its outcome is uncertain. Reconcile
+that create before retrying it so a lost response cannot produce a duplicate. Keep
+the same local customer and contact IDs across reopening and retry; expose the
+blocked step and its repair path in sync status.
+
 ## Command Queue Retry
 
 Failed REST calls remain in the command queue as failed commands. A retry action should
@@ -271,6 +286,11 @@ local rows and rebuild the payload just in time.
 Network errors should be user friendly. Store the raw technical message separately,
 but show guidance such as "Run Sync again when the connection is stable."
 ## Send Feedback
+
+Before an explicit Price or Sync action that changes Acumatica, explain which saved
+record, related rows, and attachments it will send, and whether Acumatica will update
+pricing. Ask for confirmation using the action's verb. Match the description to the
+actual queued work and keep the Core Jigx confirmation guidance for other effects.
 
 REST execute-action `onSuccess` confirms local queue acceptance, not server success.
 Acknowledge it as a send request. Derive completion from a successful REST response

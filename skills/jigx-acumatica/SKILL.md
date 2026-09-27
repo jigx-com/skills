@@ -49,16 +49,17 @@ Acumatica-specific integration rules.
   owner selectors and `ContactID`, finding cascades, diagnosing a rejected value,
   round-trip proof, the hardening gauntlet, value semantics, workflow actions.
 - `references/acumatica-reads-and-sync-contract.md` - inquiries for lists, creating
-  an inquiry, delta sync, addressed and parent-driven reads, row identity, the row cap.
+  an inquiry, delta sync and checkpoints, addressed and parent-driven reads, row
+  identity, the row cap.
 - `references/acumatica-endpoints-and-files.md` - contract REST as fallback, detail
   collections, creating a missing endpoint, attaching files to a record.
 - `references/acumatica-rest.md` - REST functions, parameters, payloads, errors.
 - `references/acumatica-sync.md` - local-first sync, Remote states, command queue,
-  parent-child search/replace, retry.
+  dependent creates, stable local/remote IDs, retry.
 - `references/acumatica-lookups-expands.md` - lookup sync, OData/REST differences,
   `$expand`, force sync, dropdown fields.
-- `references/acumatica-files-submit.md` - file uploads, PDF attachments, service
-  order submit patterns.
+- `references/acumatica-files-submit.md` - file uploads and binary readback, PDF
+  attachments, service order submit patterns.
 
 - `references/integration-verification.md` - test app-populated data through the
   generated request, authorized live writes and remote readback.

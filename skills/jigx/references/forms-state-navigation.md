@@ -40,8 +40,9 @@ bodies copied from the form. The eventual sync action should re-query the local 
 so repeated local edits collapse into the latest state.
 
 Do not block child work only because the parent has not been synced yet. Generate
-stable local IDs for new parents and children, then replace them after the remote
-system returns real IDs.
+stable local IDs for new parents and children. Keep returned remote IDs separately
+when local children or queued work refer to those IDs. If an app deliberately rekeys
+local rows, update every dependent row and queued reference together.
 
 ## Dirty State And Discard Warning
 
@@ -93,6 +94,19 @@ parent workspace -> child tab receives parentId
 child tab -> add action creates childId -> child editor
 child editor -> save with childId + parentId -> return to parent workspace
 ```
+
+## Choose Existing Or Add New
+
+When a form lets users choose an existing related record or create one, keep both
+paths in the same editing flow. Place an Add New entry near the selector and open a
+focused creation screen or bottom sheet. Return its stable local ID to the parent
+draft so the relationship works offline; the final parent Save remains the boundary
+that accepts the complete draft. Closing the creation UI should discard only its
+unaccepted changes.
+
+If the business relationship cannot change after the parent is created, disable the
+selector for saved records and enforce the same rule when saving. A disabled control
+alone does not protect the stored relationship.
 
 ## Copy Flow
 

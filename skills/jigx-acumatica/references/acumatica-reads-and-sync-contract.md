@@ -49,6 +49,13 @@ to the newest row of whichever address was fetched last, and the next address is
 told to skip everything older, so it arrives short and stays short. Keep the watermark
 per address, or do not use delta on a read that takes an address.
 
+For a refresh that combines several inquiries, track the last completed read for each
+inquiry (and each address where applicable). Move that checkpoint forward only after
+every page of that inquiry has been received and either applied or durably deferred.
+A failed page must remain eligible on the next attempt. If a local edit prevents an
+incoming row from being applied, keep that server change pending for a later refresh.
+Hold the relevant checkpoint or record the deferred row and its server version.
+
 ## Reads That Need An Address
 
 Some reads cannot run until the caller says where to look, and some should not run
