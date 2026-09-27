@@ -5,9 +5,9 @@ Use this index to load the smallest reference needed for the task.
 | Task | Read |
 | --- | --- |
 | Create or reorganize an app | `app-architecture.md` |
-| Add local tables, SQL datasources, search, or refresh behavior | `datasources.md` |
+| Add local tables, Dynamic Data, SQL datasources, search, or refresh behavior | `datasources.md` |
 | Build forms, save actions, queued local saves, dirty state, required fields, copy flows | `forms-state-navigation.md` |
-| Add tabs, sections, list items, header actions, bottom actions, swipe actions | `tabs-sections-lists.md` |
+| Add tabs, sections, list items, action placement, confirmations, bottom actions, swipe actions | `tabs-sections-lists.md` |
 | Add photos, signatures, local files, HTML/PDF generation, JS functions | `media-pdf-javascript.md` |
 | Work with JSONata, validation, dropdowns, formatting, icons | `jsonata-validation-formatting.md` |
 | New solutions, form/sync changes, and prepublish verification | `runtime-verification.md` |

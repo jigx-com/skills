@@ -13,6 +13,23 @@ contract for externally owned ERP records. A typical table stores:
 - user-visible status fields inside `data`
 - remote/sync metadata only when the integration requires it
 
+## Dynamic Data Provider And Offline Prefetch
+
+A SQLite datasource that reads Jigx Dynamic Data must use the dynamic provider and
+declare each `default/<table>` it queries as an entity. A local-provider datasource
+reads device-local tables; naming a Dynamic Data table in its SQL does not make that
+table synchronize. Keep externally owned transactional drafts in their chosen local
+tables rather than moving them to Dynamic Data merely to support offline use.
+
+A screen datasource starts Dynamic Data synchronization when first used; a global
+datasource starts it on solution load. For small shared settings needed offline before
+their screen is opened, prefetch the entities with a Dynamic Data `sync-entities`
+action in the solution's `onLoad`. This runs when the solution is first loaded.
+Use solution- or jig-level `onAppActivated` for work when the phone app returns from
+background or inactive; it does not fire on initial launch. `onFocus` applies when a
+jig receives focus through navigation. Verify the provider, entity names, and offline
+rows on the target app.
+
 ## Local-First Transactional Tables
 
 For offline-capable transactional work, use the same local table for inbound data and
@@ -84,8 +101,9 @@ record is saved but not visible until a full screen reload.
 
 Keep read refresh and writeback separate.
 
-- Screen `onLoad`/`onFocus` may run small read checks only when the app intentionally
-  shows "new data available" indicators.
+- Solution `onLoad` may prefetch bounded Dynamic Data needed for offline use.
+- Screen `onFocus` may run small read checks when the app intentionally shows
+  "new data available" indicators.
 - Pull-to-refresh or a refresh button may fetch latest read data, but should not drain
   outbound write queues unless the product explicitly defines that refresh as a submit
   action.

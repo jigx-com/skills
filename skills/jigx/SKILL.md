@@ -31,11 +31,12 @@ needed for the task.
 
 - `references/recipe-index.md` - when to read each reference.
 - `references/app-architecture.md` - project layout, constants, build/deploy order.
-- `references/datasources.md` - local tables, SQL, JSON extraction, search, refresh.
+- `references/datasources.md` - local tables, Dynamic Data providers and prefetch,
+  SQL, JSON extraction, search, refresh.
 - `references/forms-state-navigation.md` - forms, save actions, dirty state, inputs,
   parent-child IDs, copy flows.
 - `references/tabs-sections-lists.md` - tabbed workspaces, sections, list items,
-  swipe actions, header actions, bottom actions.
+  swipe actions, action placement, bottom action visibility, confirmations.
 - `references/media-pdf-javascript.md` - media fields, file paths, HTML/PDF generation,
   scripts, share/regenerate flows.
 - `references/jsonata-validation-formatting.md` - JSONata, validation, formatting,

@@ -46,15 +46,31 @@ calls for it; reserve form Save for accepting the editing scope. Avoid adding mu
 Save/Sync/Refresh controls that perform overlapping work. Keep destructive actions
 away from high-frequency primary actions when users can accidentally tap them.
 
+Place actions according to what they affect: Add belongs with its collection, row
+operations belong on the row, the current form's Save belongs in the bottom actions,
+and record-level Price or Sync can live in that record's header. Keep read refresh on
+the list and failed-write retry in a status or error view when those are separate
+workflows. Choose placement from the screen's task rather than repeating the same
+write action across scopes.
+
 ## Bottom Actions
 
 Core SDK `screen.bottomPanel()` creates a new conditional action group on every
 call. The runtime selects only the first group whose `when` is absent or true.
-Create one panel per screen and append its buttons with `panel.add`; do not create
-one unconditional panel per button. Set `numberOfVisibleActions: 2` when both main
-actions should be directly visible; additional children use the overflow menu.
+Create one panel per screen and append its actions with `panel.add`; do not create
+one unconditional panel per action. Every Jigx, including one displayed as a modal
+bottom sheet, can have multiple bottom actions. With `numberOfVisibleActions: 1`,
+one action is visible and the others are in the `...` menu. With
+`numberOfVisibleActions: 2`, two are visible and further actions are in that menu.
+Put the primary action first and set the visible count according to which actions
+need prominence.
 Validate the generated screen's selected group's `children`, not merely the
 presence of action labels anywhere in the output.
+
+Name an editing action for its effect. An ambiguous `Close` button does not tell the
+user whether changes are saved. If closing the screen already discards unaccepted
+work, a single visible Save action can be enough. Where explicit Cancel is useful,
+label it Cancel and choose whether it should be visible or in the overflow menu.
 
 Use bottom actions for the main task on the current screen. For PDF tabs, useful bottom
 actions are:
@@ -63,6 +79,18 @@ actions are:
 - Regenerate
 
 Show user feedback after long-running actions, especially generation actions.
+
+## Confirmations And Completion Feedback
+
+For consequential submission, pricing, charging, conversion, deletion, or discard,
+use a confirmation when the user needs to understand the effect before proceeding.
+Name the target and describe what will be sent, changed, charged, deleted, or lost;
+use a specific confirmation verb. Include material details such as the amount and
+payment method for a charge. Run the action only after confirmation. A routine local
+Save need not add a confirmation step.
+
+If the action queues later work, acknowledge the request as queued or processing.
+Show completion only after the required work is actually confirmed.
 
 ## Swipe Actions
 
