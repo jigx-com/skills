@@ -16,8 +16,12 @@ an index adds to write cost.
 
 ## Pick the mode
 
+Invoked as `/jigx-performance audit [solution path]` or `/jigx-performance build`, use
+that mode. Invoked with no argument, or loaded from the task, pick by the request:
+
 - **Audit an existing solution**: the user reports a slow screen, or asks for a
-  performance review. Follow "Audit" below.
+  performance review. Follow "Audit" below. Default the solution path to the current
+  project and its `build/output.json`; build first if that file is missing.
 - **Build or change a solution**: a new or changed `datasource.sqlite`,
   `action.execute-sql`, or list. Follow "Build" below.
 

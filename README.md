@@ -104,7 +104,8 @@ REST/OData functions, `acuerp` tokens, `acumaticaURL` casing, lookup expands,
 local-first sync, command queue retry, file upload, PDF attachment, and service order
 submission patterns.
 
-Use `jigx-performance` with `jigx` when a screen is slow or logs
+Run it as `/jigx-performance audit [solution path]` or `/jigx-performance build` in
+Claude Code, or let it load on its own: use `jigx-performance` with `jigx` when a screen is slow or logs
 `Timeout for first snapshot`, when auditing a solution, or when writing a
 `datasource.sqlite` query, an `action.execute-sql` index, or a list whose items read
 datasources.
