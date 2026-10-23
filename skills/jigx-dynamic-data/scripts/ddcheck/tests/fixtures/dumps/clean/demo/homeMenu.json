@@ -1,0 +1,23 @@
+[
+ {
+  "rid": "m1",
+  "content": {
+   "title": "Customers",
+   "linkTo": "customers",
+   "active": true,
+   "column": 10,
+   "parameters": {
+    "heading": "All"
+   }
+  }
+ },
+ {
+  "rid": "m2",
+  "content": {
+   "title": "Old",
+   "linkTo": "gone",
+   "active": false,
+   "column": 20
+  }
+ }
+]

@@ -1,0 +1,8 @@
+type: datasource.sqlite
+options:
+  provider: DATA_PROVIDER_DYNAMIC
+  entities:
+    - default/config
+  query: |
+    SELECT json_extract(data, '$.featureA') AS featureA, json_extract(data, '$.featureB') AS featureB
+    FROM [default/config]

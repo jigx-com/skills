@@ -1,0 +1,33 @@
+[
+ {
+  "rid": "m1",
+  "content": {
+   "title": "Customers",
+   "linkTo": "no-such-jig",
+   "active": true,
+   "column": 10
+  }
+ },
+ {
+  "rid": "m2",
+  "content": {
+   "title": "Text flag",
+   "linkTo": "customers",
+   "active": "true",
+   "column": 20,
+   "parameters": {
+    "heading": "x",
+    "unread": 1
+   }
+  }
+ },
+ {
+  "rid": "m3",
+  "content": {
+   "title": "Old",
+   "linkTo": "gone",
+   "active": false,
+   "column": 30
+  }
+ }
+]

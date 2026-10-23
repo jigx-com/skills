@@ -1,0 +1,6 @@
+provider: DATA_PROVIDER_DYNAMIC
+tables:
+  config:
+  homeMenu:
+  zones:
+  visitAnswers:

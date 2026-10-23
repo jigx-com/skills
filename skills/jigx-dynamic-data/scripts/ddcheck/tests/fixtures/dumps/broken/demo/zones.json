@@ -1,0 +1,16 @@
+[
+ {
+  "rid": "z1",
+  "content": {
+   "region": "north",
+   "name": "A"
+  }
+ },
+ {
+  "rid": "z3",
+  "content": {
+   "region": "south",
+   "name": "C"
+  }
+ }
+]

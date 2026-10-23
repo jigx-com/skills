@@ -1,0 +1,13 @@
+{
+  "_comment": "Profile for the made-up demo solution used by the tests.",
+  "org": "00000000-0000-4000-8000-000000000000",
+  "holdTables": ["config"],
+  "tenantNames": ["acme"],
+  "protect": ["*-prod"],
+  "rules": [
+    {"type": "menuParameters"},
+    {"type": "singleRow", "table": "config"},
+    {"type": "configFlags", "table": "config"},
+    {"type": "countBy", "table": "zones", "field": "region", "expect": {"north": 2}}
+  ]
+}

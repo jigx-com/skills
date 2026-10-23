@@ -1,0 +1,9 @@
+title: Customers
+type: jig.default
+inputs:
+  parameters:
+    type: object
+children:
+  - type: component.text
+    options:
+      text: =@ctx.jig.inputs.parameters.heading

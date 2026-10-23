@@ -1,0 +1,14 @@
+title: Home
+type: jig.default
+datasources:
+  menu:
+    type: datasource.sqlite
+    options:
+      provider: DATA_PROVIDER_DYNAMIC
+      entities:
+        - default/homeMenu
+      query: |
+        SELECT id, json_extract(data, '$.title') AS title, json_extract(data, '$.linkTo') AS linkTo
+        FROM [default/homeMenu]
+        WHERE json_extract(data, '$.active') = true AND json_extract(data, '$.column') != 50
+children: []

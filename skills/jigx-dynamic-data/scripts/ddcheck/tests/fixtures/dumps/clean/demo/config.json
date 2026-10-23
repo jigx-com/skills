@@ -1,0 +1,9 @@
+[
+ {
+  "rid": "c1",
+  "content": {
+   "featureA": true,
+   "featureB": false
+  }
+ }
+]

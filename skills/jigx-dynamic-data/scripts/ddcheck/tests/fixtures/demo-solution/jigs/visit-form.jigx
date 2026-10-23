@@ -1,0 +1,11 @@
+title: Visit
+type: jig.default
+actions:
+  - children:
+      - type: action.execute-entity
+        options:
+          provider: DATA_PROVIDER_DYNAMIC
+          entity: default/visitAnswers
+          method: save
+          data: =@ctx.jig.state.answers
+children: []
