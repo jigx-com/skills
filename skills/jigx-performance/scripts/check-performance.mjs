@@ -137,6 +137,50 @@ const asArray = v => Array.isArray(v) ? v : v === undefined || v === null ? [] :
 const statementText = s => typeof s === 'string' ? s : (s?.statement ?? s?.sql ?? '');
 const escapeRe = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const tableName = entity => String(entity).replace(/^default\//, '').toLowerCase();
+// The outer SELECT's column names (null when it selects *), for checking a list query returns id.
+export function outerColumns(sql) {
+  const masked = maskSql(sql);
+  let depth = 0, start = -1, end = -1;
+  for (let i = 0; i < masked.length && end < 0; i++) {
+    const ch = masked[i];
+    if (ch === '(') depth++;
+    else if (ch === ')') depth--;
+    else if (depth === 0 && /\w/.test(ch) && !/\w/.test(masked[i - 1] ?? '')) {
+      const word = /^\w+/.exec(masked.slice(i))[0].toUpperCase();
+      if (start < 0 && word === 'SELECT') start = i + 6;
+      else if (start >= 0 && ['FROM', 'UNION', 'ORDER', 'LIMIT'].includes(word)) end = i;
+      i += word.length - 1;
+    }
+  }
+  if (start < 0) return [];
+  const cols = [];
+  let from = start; depth = 0;
+  const stop = end < 0 ? masked.length : end;
+  for (let i = start; i <= stop; i++) {
+    if (masked[i] === '(') depth++;
+    else if (masked[i] === ')') depth--;
+    if (i === stop || (depth === 0 && masked[i] === ',')) { cols.push(sql.slice(from, i).trim()); from = i + 1; }
+  }
+  if (cols.some(c => /(^|\.)\*$/.test(c))) return null;
+  return cols.map(c => (/\bAS\s+["\[`]?([\w-]+)["\]`]?$/i.exec(c) ?? /^(?:[\w-]+\.)?["\[`]?(\w+)["\]`]?$/.exec(c))?.[1]).filter(Boolean);
+}
+
+// '$.field' literals the rewriter would turn into json_extract: those not passed to a json_* function.
+export function shorthandPaths(sql) {
+  const found = [];
+  for (const m of sql.matchAll(/--[^\n]*|\/\*[\s\S]*?\*\/|'(?:''|[^'])*'/g)) {
+    if (!m[0].startsWith("'$")) continue;
+    const before = maskSql(sql.slice(0, m.index));
+    let depth = 0, open = -1;
+    for (let i = before.length - 1; i >= 0; i--) {
+      if (before[i] === ')') depth++;
+      else if (before[i] === '(' && depth-- === 0) { open = i; break; }
+    }
+    if (open < 0 || !/\bjson_\w+\s*$/i.test(before.slice(0, open))) found.push(m[0]);
+  }
+  return found;
+}
+
 const MB = 1024 * 1024;
 const size = st => `${st.rows} rows, ${(st.bytes / MB).toFixed(1)} MB`;
 
@@ -150,6 +194,13 @@ export const RULES = {
   'uncapped-search-list': {priority: 'medium', section: 'C', fix: 'Add a LIMIT (e.g. 200) and union a pinned arm for the current selection.'},
   'unindexed-predicate': {priority: 'low', section: 'B', fix: 'If the table can grow, ship an expression index with exactly this text, then confirm with check-plans.py.'},
   'wrapped-predicate': {priority: 'low', section: 'B', fix: 'Filter on one indexable json_extract expression (store a normalised key if needed) and index it.'},
+  'rewrite-query-shorthand': {priority: 'high', section: 'B', fix: "Write every '$.field' as json_extract(data, '$.field') (select list and WHERE), or remove rewriteQuery: false."},
+  'list-no-id': {priority: 'medium', section: 'C', fix: 'Select a unique id column (e.g. SELECT id, … or … AS id) so the list keys rows by it (DS-02).'},
+  'list-item-instance-id': {priority: 'medium', section: 'C', fix: 'Remove instanceId from the list item; the list sets it from each row id (CO-04).'},
+  'list-custom-component-item': {priority: 'medium', section: 'C', fix: 'Use a built-in list item; each custom component adds renderer wrappers per row (CO-01).'},
+  'component-list-for-data': {priority: 'low', section: 'C', fix: 'Use jig.list, which virtualises, for a datasource list that can exceed about ten rows (CO-02).'},
+  'list-dynamic-height': {priority: 'low', section: 'C', fix: 'Use fixed-height items; hasDynamicHeight measures every item (CO-03).'},
+  'rewrite-query-on': {priority: 'low', section: 'B', fix: "Write json_extract in full and set rewriteQuery: false (DS-03); small gain, do it after index and list fixes."},
   'index-not-idempotent': {priority: 'medium', section: 'B', fix: 'Use CREATE INDEX IF NOT EXISTS.'},
   'datasource-not-equals': {priority: 'low', section: 'D', fix: "Use $count(ds[field='X']) = 0 so the no-row case passes."},
   'unused-datasource': {priority: 'medium', section: 'E', fix: 'Delete it, or move it into the one screen that needs it. A global datasource re-runs whenever its tables change.'},
@@ -195,6 +246,7 @@ export function checkPerformance(app, {stats = null, sources = {}} = {}) {
       if (typeof node.options?.query === 'string') sqlText += '\n' + node.options.query;
     }
     if (node.type === 'datasource.sqlite' && typeof node.options?.query === 'string') datasources.push({path, node});
+    if (node.type === 'jig.list' || node.type === 'component.list') checkList(node, path);
     if (node.type === 'action.execute-sql') {
       ddlActions.push({path, node});
       sqlText += '\n' + asArray(node.options?.statements ?? node.statements).map(statementText).join('\n');
@@ -224,6 +276,28 @@ export function checkPerformance(app, {stats = null, sources = {}} = {}) {
         add('filter-inside-map', `${path}.${key}`, 'A datasource filter inside $map walks the view once per element (O(n²)).');
     }
   });
+
+  function checkList(node, path) {
+    const inJig = node.type === 'jig.list';
+    const data = inJig ? node.data : node.options?.data;
+    const item = inJig ? node.item : node.options?.item;
+    const itemPath = `${path}${inJig ? '' : '.options'}.item`;
+    if (item && (item.instanceId !== undefined || item.options?.instanceId !== undefined))
+      add('list-item-instance-id', itemPath, 'The list item sets instanceId, which overrides the id the list keys each row by.');
+    if (item?.type === 'component.custom-component')
+      add('list-custom-component-item', itemPath, 'Each row renders a custom component.');
+    if (item?.options?.hasDynamicHeight ?? node.options?.hasDynamicHeight)
+      add('list-dynamic-height', path, 'hasDynamicHeight makes the list measure every item.');
+    const name = /^=\s*@ctx\.datasources\.([\w-]+)\s*(\[[^\]]*\])?\s*$/.exec(typeof data === 'string' ? data : '')?.[1];
+    if (!name) return;
+    const owner = /^\$\.(jigs|components)\.([^.]+)/.exec(path);
+    const ds = (owner && app[owner[1]]?.[owner[2]]?.datasources?.[name]) ?? app.datasources?.[name];
+    if (ds?.type !== 'datasource.sqlite' || typeof ds.options?.query !== 'string') return;
+    if (!inJig) add('component-list-for-data', path, `component.list renders every row of ${name} at once.`);
+    const cols = outerColumns(ds.options.query);
+    if (cols && !cols.some(c => c.toLowerCase() === 'id'))
+      add('list-no-id', path, `The list's datasource ${name} does not select an id column, so rows have no stable key.`);
+  }
 
   const boundEntities = new Set();
   for (const {node} of datasources) for (const e of asArray(node.options?.entities)) boundEntities.add(typeof e === 'string' ? e : e?.entity);
@@ -257,6 +331,10 @@ export function checkPerformance(app, {stats = null, sources = {}} = {}) {
     const rows = Math.max(0, ...asArray(node.options.entities).map(e => stats?.[tableName(typeof e === 'string' ? e : e?.entity)]?.rows ?? 0));
     const sized = rows >= 1000 ? {priority: 'medium'} : {};
     const masked = maskSql(query);
+    const shorthand = node.options.rewriteQuery === false ? shorthandPaths(query) : [];
+    if (shorthand.length) add('rewrite-query-shorthand', `${path}.options.query`,
+      `rewriteQuery: false, but ${[...new Set(shorthand)].join(', ')} is shorthand: the query returns the literal text, not the field.`, {severity: 'error'});
+    if (node.options.rewriteQuery !== false) add('rewrite-query-on', `${path}.options`, 'rewriteQuery is on, so the query is rewritten before its first run.');
     if (/\bLIKE\b/i.test(masked) && /'%'\s*\|\|/.test(stripComments(query)) && !/\bLIMIT\b/i.test(masked))
       add('uncapped-search-list', `${path}.options.query`, "Contains-search (LIKE '%' || …) with no LIMIT scans, sorts and renders every row.");
     for (const p of filterPredicates(query)) {
@@ -354,16 +432,21 @@ const SDK_KIND = {screenId: 'jigs', jigId: 'jigs', datasourceId: 'datasources', 
 export function sdkSources(outputFile) {
   const project = path.dirname(path.dirname(path.resolve(outputFile)));
   const src = path.join(project, 'src');
-  const sources = {};
+  const sources = {}, declared = {};
   if (!fs.existsSync(src)) return sources;
+  const id = /\b(screenId|jigId|datasourceId|actionId|functionId)\s*:\s*['"]([^'"]+)['"]/;
+  // A declaration (app.addScreen.default({ screenId })) wins over a reference such as a tab's screenId.
+  const declaration = new RegExp(`\\.add(?:Screen|Jig|Datasource|Action|Function)\\w*(?:\\.\\w+)?\\(\\s*\\{[^}]*?${id.source}`);
   const visit = dir => {
     for (const e of fs.readdirSync(dir, {withFileTypes: true})) {
       const full = path.join(dir, e.name);
       if (e.isDirectory()) { if (e.name !== 'node_modules') visit(full); continue; }
       if (!e.name.endsWith('.ts')) continue;
-      const m = /\b(screenId|jigId|datasourceId|actionId|functionId)\s*:\s*['"]([^'"]+)['"]/.exec(fs.readFileSync(full, 'utf8'));
+      const text = fs.readFileSync(full, 'utf8');
+      const d = declaration.exec(text);
+      const m = d ?? id.exec(text);
       const key = m && `$.${SDK_KIND[m[1]]}.${m[2]}`;
-      if (key && !sources[key]) sources[key] = path.relative(project, full);
+      if (key && (!sources[key] || (d && !declared[key]))) { sources[key] = path.relative(project, full); declared[key] = !!d; }
     }
   };
   visit(src);

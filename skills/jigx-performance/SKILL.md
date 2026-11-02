@@ -67,8 +67,9 @@ Follow `references/customer-review.md`:
    the path inside it), what is wrong and the recommended fix. `audit.md` groups them
    by priority and type. It covers sync (tables nothing reads, full pulls, missing
    `$select`, large tables), unused global datasources, per-row datasource reads,
-   uncapped searches, unindexed and wrapped filters, `execute-sql` DDL risks and JSONata
-   traps. Every finding is a lead to measure, not a verdict. Then list full scans and
+   uncapped searches, list rules (an `id` in every list datasource, no `instanceId` on
+   items, built-in items, `jig.list`, fixed height), `rewriteQuery`, unindexed and
+   wrapped filters, `execute-sql` DDL risks and JSONata traps. Every finding is a lead to measure, not a verdict. Then list full scans and
    unused indexes from the query planner:
 
    ```sh

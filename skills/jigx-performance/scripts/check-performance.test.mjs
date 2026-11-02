@@ -4,10 +4,11 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {spawnSync} from 'node:child_process';
-import {checkPerformance, filterPredicates, parseCreateIndex, normaliseExpr, loadSolution, markdownReport, newFindings, sdkSources, where} from './check-performance.mjs';
+import {checkPerformance, filterPredicates, parseCreateIndex, normaliseExpr, loadSolution, markdownReport, newFindings, outerColumns, sdkSources, shorthandPaths, where} from './check-performance.mjs';
 
-// Fixtures hold unreferenced global datasources; that check has its own test.
-const codes = (app, opts) => checkPerformance(app, opts).findings.map(x => x.code).filter(c => c !== 'unused-datasource').sort();
+// Fixtures hold unreferenced global datasources and leave rewriteQuery on; those checks have their own tests.
+const NOISE = new Set(['unused-datasource', 'rewrite-query-on']);
+const codes = (app, opts) => checkPerformance(app, opts).findings.map(x => x.code).filter(c => !NOISE.has(c)).sort();
 const ds = (query, entities = ['default/fileUploadQueue']) => ({type: 'datasource.sqlite', options: {entities, query}});
 const PRED = "LOWER(COALESCE(json_extract(q.data, '$.status'), ''))";
 const INDEX = "CREATE INDEX IF NOT EXISTS idx_fileUploadQueue_status ON [fileUploadQueue] (LOWER(COALESCE(json_extract(data, '$.status'), '')))";
@@ -136,7 +137,7 @@ test('loads a YAML solution folder into the output.json shape', {skip: spawnSync
   assert.equal(app.datasources.orders.options.query, 'SELECT * FROM [default/orders]');
   assert.equal(sources['$.jigs.list-orders'], 'jigs/Orders/list-orders.jigx');
   assert.deepEqual(parseErrors.map(e => e.file), ['jigs/broken.jigx']);
-  assert.deepEqual(checkPerformance(app, {sources}).findings, []);
+  assert.deepEqual(checkPerformance(app, {sources}).findings.filter(f => !NOISE.has(f.code)), []);
 });
 
 test('targeted pulls, tables pulled by delta elsewhere and expression entity lists are not flagged', () => {
@@ -172,6 +173,7 @@ test('maps SDK build entries to the TypeScript file that declares them', () => {
   write('build/output.json', '{}');
   write('src/jigs/Orders/list-orders.ts', "app.addScreen({ screenId: 'list-orders' })\nscreen.addDatasource.static({ datasourceId: 'local' })");
   write('src/datasources/orders.ts', "app.addDatasource.sqlite({ datasourceId: 'orders' })");
+  write('src/index.ts', "app.addTab({ tabId: 'x', screenId: 'list-orders' })");
   assert.deepEqual(sdkSources(path.join(dir, 'build/output.json')),
     {'$.jigs.list-orders': 'src/jigs/Orders/list-orders.ts', '$.datasources.orders': 'src/datasources/orders.ts'});
 });
@@ -196,4 +198,43 @@ test('--fail-on gates the exit code, against the baseline when one is given', ()
   fs.writeFileSync(path.join(dir, 'base.json'), failed.stdout);
   assert.equal(run('--fail-on', 'medium', '--baseline', path.join(dir, 'base.json')).status, 0);
   assert.equal(run('--fail-on', 'nope').status, 2);
+});
+
+test('outer SELECT columns: aliases, qualified names, star, CTEs and subqueries', () => {
+  assert.deepEqual(outerColumns("SELECT q.id, json_extract(q.data, '$.a') AS a, (SELECT 1 FROM t) AS n FROM q"), ['id', 'a', 'n']);
+  assert.equal(outerColumns('WITH c AS (SELECT id FROM t) SELECT c.* FROM c'), null);
+  assert.deepEqual(outerColumns("WITH c AS (SELECT id FROM t) SELECT json_extract(data, '$.x') FROM c UNION SELECT 1"), []);
+  assert.deepEqual(outerColumns("SELECT 'x' AS id"), ['id']);
+});
+
+test("rewriteQuery: false with '$.' shorthand is an error; json_* path arguments are not shorthand", () => {
+  assert.deepEqual(shorthandPaths("SELECT '$.name' AS name, json_extract(data, '$.a'), json_set(x, '$.b', 1) FROM t WHERE COALESCE('$.c', 0) = 1 -- '$.d'"), ["'$.name'", "'$.c'"]);
+  const ds = (query, rewriteQuery) => ({type: 'datasource.sqlite', options: {entities: ['t'], query, ...(rewriteQuery !== undefined && {rewriteQuery})}});
+  const all = app => checkPerformance(app).findings.map(f => f.code).filter(c => c !== 'unused-datasource');
+  assert.deepEqual(all({datasources: {a: ds("SELECT '$.name' AS name FROM t", false)}}), ['rewrite-query-shorthand']);
+  assert.deepEqual(all({datasources: {a: ds("SELECT json_extract(data, '$.name') AS name FROM t", false)}}), []);
+  assert.deepEqual(all({datasources: {a: ds("SELECT '$.name' AS name FROM t")}}), ['rewrite-query-on']);
+});
+
+test('lists: datasource without id, instanceId on items, custom items, component.list, dynamic height', () => {
+  const ds = query => ({type: 'datasource.sqlite', options: {entities: ['t'], query, rewriteQuery: false}});
+  const item = (extra = {}) => ({type: 'component.list-item', options: {title: '=@ctx.current.item.name'}, ...extra});
+  const app = {
+    datasources: {noid: ds('SELECT name FROM t'), withid: ds('SELECT t.id, name FROM t')},
+    jigs: {
+      a: {type: 'jig.list', data: '=@ctx.datasources.noid', item: item({instanceId: 'x'})},
+      b: {type: 'jig.list', data: "=@ctx.datasources.local[status='open']", item: item(), datasources: {local: ds('SELECT * FROM t')}},
+      c: {type: 'jig.default', children: [{type: 'component.list', options: {data: '=@ctx.datasources.withid', item: {type: 'component.custom-component', options: {}}}}]},
+      d: {type: 'jig.list', data: '=@ctx.datasources.withid', item: item(), options: {hasDynamicHeight: true}},
+      e: {type: 'jig.list', data: '=$filter(@ctx.datasources.noid, function($v) {$v.ok})', item: item()},
+    },
+  };
+  const got = checkPerformance(app).findings.filter(f => f.code !== 'unused-datasource').map(f => `${f.code} ${f.where}`).sort();
+  assert.deepEqual(got, [
+    'component-list-for-data jigs/c › children.0',
+    'list-custom-component-item jigs/c › children.0.options.item',
+    'list-dynamic-height jigs/d',
+    'list-item-instance-id jigs/a › item',
+    'list-no-id jigs/a',
+  ]);
 });

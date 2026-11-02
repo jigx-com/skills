@@ -156,15 +156,18 @@ It checks:
 | Sync | tables synced that nothing reads; full pulls with no modified-date filter; OData pulls without `$select`; tables over 5 MB or 5,000 rows on the device | medium; full pulls and missing `$select` low unless `--db` shows big tables |
 | Unnecessary loads | global datasources nothing references | medium |
 | Indexes | index DDL that re-runs every bound datasource or rolls back on a fresh install; filters no shipped index matches | high (medium for a one-table step); unmatched filters low unless the table has 1,000+ rows |
-| Lists and screens | datasource reads per list row; contains-searches with no `LIMIT` | medium |
+| Lists and screens | datasource reads per list row; contains-searches with no `LIMIT`; a list whose datasource selects no `id`; `instanceId` set on a list item; custom components as list items | medium |
+| List components | `component.list` bound to a datasource (use `jig.list`); `hasDynamicHeight` items | low |
+| Query rewriting | `rewriteQuery: false` on a query that still uses `'$.field'` shorthand (returns the literal text); `rewriteQuery` left on | high (an error); low |
 | Expressions | datasource filters inside `$map` (O(n²)); `!=` against a datasource field | high; low |
 
 Findings are leads, not verdicts: confirm the ones you act on with
 `check-plans.py` (query plans), `profile-query.py` (timings on exported data) or a timed
-load (below). On the Field Services RC3 solution (618 files) the scan takes about 4
-seconds. It found 3 high, 76 medium and 442 low findings. The medium ones include two
-synced tables nothing reads and six unused global datasources. On the Expenses app rewritten to the SDK
-it found 1 high, 13 medium and 126 low, including five global datasources nothing uses.
+load (below). On a Field Services solution (about 600 files) the scan takes about 4
+seconds. It found 3 high, 77 medium and 477 low findings. The medium ones include two
+synced tables nothing reads, three lists whose datasource has no `id` and three lists of
+custom components. On the Expenses app rewritten to the SDK it found 1 high, 16 medium
+and 130 low, including five global datasources nothing uses and two lists with no `id`.
 
 ## Review a customer solution for performance
 
