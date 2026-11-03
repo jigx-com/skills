@@ -16,26 +16,37 @@ nothing reads, full pulls, unselected fields, payload size and sync timing. Sync
 delta design and writes live in the `jigx` skill (`sync-orchestration.md`,
 `writes-and-duplicates.md`).
 
-## Pick the mode
+## Start
 
-Invoked as `/jigx-performance review [solution path]`, `/jigx-performance audit
-[solution path]`, `/jigx-performance build` or `/jigx-performance measure [test
-solution]`, use that mode. Invoked with no argument, or loaded from the task, pick by
-the request:
+**`/jigx-performance` with no argument, or "check my solution's performance"**: guide
+the user; ask as little as possible.
 
-- **Review a customer solution end to end**: baseline times, an overview, proposed
-  changes by section, apply only what the user approves, measure again and report what
-  improved. Follow "Review" below. This is the default for "review this solution" or
-  "make this customer's app faster".
+1. **Find the solution** without asking: the current folder (or the path given) is YAML
+   when it has `index.jigx`, SDK when it has `src/app.ts`. For SDK, run `jigx build`
+   when `build/output.json` is missing or older than `src/`. Ask for the path only if
+   neither is found.
+2. **Audit it** (read-only, seconds; "Audit" steps 1 and 4). Show in plain words: the
+   counts by priority, then each high and medium finding you confirmed in the source,
+   as "what is wrong · where · the fix", grouped by section. Put the full list in
+   `perf-review/before/audit.md` and say where it is.
+3. **Ask one question** with these choices:
+   - **Time it and fix it**: the full review below (timings, fixes you approve,
+     timings again). Recommend this when there are high or medium findings.
+   - **Fix the high findings now** without timing, as diffs in the solution's language
+     (`references/fixes-by-language.md`), applied only after the user agrees.
+   - **Stop here**: the report is enough.
 
-- **Audit an existing solution**: the user reports a slow screen, or wants findings
-  without the full review, or a prioritized list of sync and performance problems.
-  Follow "Audit" below. Default the solution path to the current project: its folder
-  when it has `index.jigx`, else its `build/output.json` (build first if missing).
-- **Build or change a solution**: a new or changed `datasource.sqlite`,
-  `action.execute-sql`, or list. Follow "Build" below.
-- **Measure a change**: the user wants before/after times or to watch a load. Follow
-  "Measure" below.
+**`/jigx-performance review [path]`**: go straight to "Review". **`/jigx-performance
+audit [path]`**: steps 1 and 2 above, no question.
+
+Before any timing step, check what it needs and tell the user exactly what is missing
+and how to get it, in one message: a booted iOS Simulator with the Jigx app, Node
+22.5+, Maestro and Java 17+ (screen times only), and for SDK projects the `jigx_debug`
+MCP server. Skip a timing area whose tool is missing rather than stopping the review.
+
+Loaded from the task instead of a command: when the user writes or changes a
+`datasource.sqlite` query, an `action.execute-sql` index or a list, follow "Build";
+when they ask to time a change they made, follow "Measure".
 
 ## Review
 
