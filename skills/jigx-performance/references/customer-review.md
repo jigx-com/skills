@@ -1,27 +1,33 @@
 # Customer Review
 
-The end-to-end flow for `/jigx-performance review <solution path>`: measure the
-solution as it is, propose changes by section, apply only what the user approves,
-measure again and report what improved. Everything lives in `perf-review/` in the
-solution project.
+The end-to-end flow for `/jigx-performance review <solution path>`:
+
+1. **Audit** the solution for improvements.
+2. **Time** the current solution: sync, queries, actions, screen opening (which
+   includes expressions and rendering).
+3. **Propose fixes** in the solution's language (YAML or TypeScript), grouped into
+   sections A–H and ordered by priority. Apply only what the user approves.
+4. **Publish and time again**, compare with the baseline, and report what improved.
+
+Everything lives in `perf-review/` in the solution project.
 
 ## 0. Before starting
 
 Confirm with the user, once:
 
-- the solution folder and that it builds (`build/output.json`; a YAML solution has
-  none: work on a copy renamed to the test solution and publish it with Jigx Builder,
-  as in `run-and-track.md`)
+- the solution and its kind: a **YAML** folder (with `index.jigx`) or a **TypeScript
+  SDK** project (`src/app.ts`; build it with `jigx build`)
 - the **test** solution to publish to, its organisation, and the app to run it in
   (branded apps need `targetAppName`). Never publish to or time against production or a
   working user's phone
-- the journey to time: fresh sign-in and initial sync, a refresh, or opening a screen
+- the journeys to time: the sign-in sync (always), and the screens users open most
+  (3–6, e.g. the main list, a detail screen, a form)
 - realistic test data: a load that is fast because the test user has ten rows proves
   nothing
 
 Work on a branch in the customer repo. Commit nothing until the user approves changes.
 
-## 1. Baseline
+## 1. Audit
 
 ```sh
 mkdir -p perf-review/before
@@ -29,56 +35,100 @@ node <skill-directory>/scripts/check-performance.mjs <solution> --report perf-re
 python3 <skill-directory>/scripts/check-plans.py <solution> > perf-review/before/plans.json
 ```
 
-Publish the current build to the test solution (`jigx_debug` `create_debug_session`) and
-record three loads with `track-load.py --out perf-review/runs --label pre-1` (then
-`pre-2`, `pre-3`). Arm the tracker, then start the journey: drive the simulator if a UI
-tool is available, otherwise ask the user to sign in or refresh while it runs. If a load
-cannot be recorded, say so and continue with the static baseline.
+`<solution>` is the YAML folder or the SDK `build/output.json`. Check every high and
+medium finding in the source and drop the false ones before proposing anything.
 
-## 2. Overview and proposal
+## 2. Time the current solution
 
-Run `review-report.py perf-review --solution <name>` for the baseline overview. Read the
+Publish the current build to the test solution, then record each area. Use the same
+simulator, user and data for every run, before and after.
+
+- YAML: copy the solution, set the copy's `index.jigx` `name:` and `title:` to the test
+  solution and publish it with Jigx Builder (`run-and-track.md`). `jigx_debug` cannot
+  build YAML.
+- SDK: `jigx_debug` `create_debug_session` with `publish: true`.
+
+| Area | Tool | Output |
+| --- | --- | --- |
+| Sync: time to ready, each scope and step, queue, timeouts | `track-load.py`, three runs (`pre-1..3`) | `perf-review/runs/` |
+| Queries: every datasource query on the device's real data | `time-queries.mjs` | `perf-review/before/timings.{json,md}` |
+| Actions: every `execute-sql` step (rolled back) and index build | `time-queries.mjs` (same run) | the same files |
+| Screens: tap to ready, including datasources, expressions and rendering | `time-screens.py`, three runs a screen | `perf-review/screens/pre.{json,md}` |
+| Expressions | no runtime timing exists; measured inside screen time, located by the audit (`per-row-datasource-read`, `filter-inside-map`) | — |
+
+```sh
+python3 <skill-directory>/scripts/track-load.py --solution <test-solution> --wait --out perf-review/runs --label pre-1 --scopes <scopes>
+# after the sync: the database the timings run on
+python3 <skill-directory>/scripts/track-load.py --list
+node <skill-directory>/scripts/time-queries.mjs <solution> --db <test-solution database> \
+  --report perf-review/before/timings.md > perf-review/before/timings.json
+python3 <skill-directory>/scripts/time-screens.py perf-review/screens.json --label pre --out perf-review/screens
+```
+
+- **Sync**: arm the tracker, then sign in; repeat for `pre-2`, `pre-3`. Drive the
+  simulator if a UI tool is available, otherwise ask the user to sign in while it runs.
+- **Queries and actions** run on a copy of the test user's database after the sync, so
+  they see real row counts. Parameters are sampled from the data; pass
+  `--params params.json` for the ids the key screens open with. A phone is several
+  times slower than the host: rank by these numbers, do not quote them as device time.
+- **Screens**: write `perf-review/screens.json` once (format in `time-screens.py`):
+  for each screen the tap that opens it and a text or id that is only visible once its
+  data has loaded (a row number, not the title). Read the screen's YAML or TS for the
+  label and ready element, and confirm them in the simulator. Add one static screen as
+  a control; its time is Maestro's overhead. Needs Maestro and Java on the host.
+
+If an area cannot be recorded (no simulator, no Maestro, no populated database), say
+which and continue with the rest.
+
+## 3. Overview and proposal
+
+Run `review-report.py perf-review --solution <name>` for the baseline overview: load
+time, the slowest queries, actions and screens, and the findings per section. Read the
 references for each section and review what the scripts cannot see: state, expressions,
 screen size, start-up, sync shape, writes, credentials. Then present:
 
-1. **Overview**: the time to ready and the slowest sync steps from the baseline runs,
-   and the findings table by section.
-2. **Proposed changes, grouped by section A–H** (`recipe-index.md`). For each change:
-   what and where (file and line), why (finding and measured cost), expected effect,
-   risk, and how it will be verified. Order sections by measured cost, largest first.
+1. **Overview**: the timings from step 2 (sync time to ready and the slowest steps, the
+   slowest queries and actions, each screen's open time) and the findings by section.
+2. **Proposed changes, grouped by section A–H** (`recipe-index.md`), sections ordered
+   by the highest priority they contain, then by measured cost. Within a section, high
+   first. For each change:
+   - **what and where**: the file and line in the solution's language, as a short diff
+     (`.jigx` for YAML, `src/*.ts` for SDK; `fixes-by-language.md`)
+   - **why**: the finding and the time it costs (from step 2)
+   - **expected effect** and **risk**
+   - **how it will be verified**: which timing should move
 3. **Not proposed**: findings left alone and why (unreachable path, needs the API owner,
-   needs a product decision).
+   needs a product decision, accepted pattern).
 
 Then stop and ask which sections or changes to apply. Do not change any file before the
 user agrees. Approval for one section does not cover another.
 
-## 3. Apply
+## 4. Apply, publish and time again
 
 For each approved section, in order:
 
-- make the changes with the section's reference, one commit per section
+- make the changes in the solution's language (`fixes-by-language.md`) with the
+  section's reference, one commit per section
 - for a sync change, trace what each step reads through every action it calls before
   reordering or parallelising it (`jigx` `sync-orchestration.md`)
 - keep every index or rewrite equivalence-checked (`verifying.md`)
 - add a `check-plans.py` guard for each per-row or per-change lookup you fixed
 - append each change to `perf-review/changes.json` as
   `{"section": "B", "change": "Index orders by reference", "files": ["actions/create-indexes.jigx"]}`
+- rebuild (SDK: `jigx build`) and run the `jigx` runtime checker; stop and report if it
+  fails
 
-Rebuild and run the `jigx` runtime checker after each section. Stop and report if it
-fails.
-
-## 4. Measure again
+Then audit again, publish to the same test solution and repeat every timing from step 2
+with the same journeys, data and simulator:
 
 ```sh
 mkdir -p perf-review/after
 node <skill-directory>/scripts/check-performance.mjs <solution> --report perf-review/after/audit.md > perf-review/after/static.json
 python3 <skill-directory>/scripts/check-plans.py <solution> > perf-review/after/plans.json
-```
-
-Publish to the same test solution, record `post-1..3` with the same journey, data and
-simulator, then:
-
-```sh
+python3 <skill-directory>/scripts/track-load.py --solution <test-solution> --wait --out perf-review/runs --label post-1 --scopes <scopes>
+node <skill-directory>/scripts/time-queries.mjs <solution> --db <test-solution database> \
+  --baseline perf-review/before/timings.json --report perf-review/after/timings.md > perf-review/after/timings.json
+python3 <skill-directory>/scripts/time-screens.py perf-review/screens.json --label post --out perf-review/screens --compare pre
 python3 <skill-directory>/scripts/compare-runs.py perf-review/runs --before pre --after post
 python3 <skill-directory>/scripts/review-report.py perf-review --solution <name>
 ```
@@ -86,11 +136,22 @@ python3 <skill-directory>/scripts/review-report.py perf-review --solution <name>
 Compare the row count of every table with a copy of the database taken after a pre
 run, not only the watched tables; a faster load that fetched less is a regression. A
 change that reorders or parallelises steps needs this most: it can run a step before the
-data it filters by exists.
+data it filters by exists. Time the queries on the same data before and after (the
+same sync of the same user), or the comparison measures the data, not the change.
 
 ## 5. Report
 
-Show the user `perf-review/report.md`: time to ready before and after, the steps that
-got faster or slower, snapshot timeouts and errors, findings per section before and
-after, the changes applied, and what was not verified. Offer it as a page for the
-customer. Say plainly when a step was not run or a number got worse.
+Show the user `perf-review/report.md`:
+
+- **Sync**: time to ready before and after, the steps that got faster or slower,
+  snapshot timeouts and errors
+- **Queries and actions**: the ones that moved, with before and after times
+- **Screens**: each screen's open time before and after, faster, slower or the same
+- **Findings** per section before and after, and the changes applied
+- **Feedback**: which changes paid off, which did not move anything, any regression and
+  its likely cause, and what to try next
+- **Not verified**: what could not be measured, and that simulator and host timings show
+  relative change, not a customer's device
+
+Offer it as a page for the customer. Say plainly when a step was not run or a number got
+worse.

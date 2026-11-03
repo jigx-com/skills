@@ -8,11 +8,15 @@ Standard library only. Reads a review folder laid out as:
   <folder>/after/static.json    the same after changes (optional until applied)
   <folder>/after/plans.json
   <folder>/runs/comparison.json compare-runs.py output (optional)
+  <folder>/before/timings.json  time-queries.mjs output (optional)
+  <folder>/after/timings.json   time-queries.mjs --baseline before/timings.json (optional)
+  <folder>/screens/pre.json     time-screens.py --label pre (optional)
+  <folder>/screens/post.json    time-screens.py --label post --compare pre (optional)
   <folder>/changes.json         [{"section": "B", "change": "...", "files": [...]}] (optional)
 
-and writes <folder>/report.md (and prints it): load times before and after, findings
-per section A-H before and after, the changes applied per section, and what was not
-measured. With only the before files it writes the overview used for the proposal.
+and writes <folder>/report.md (and prints it): sync, query, action and screen times
+before and after, findings per section A-H before and after, the changes applied per
+section, and what was not measured. With only the before files it writes the overview used for the proposal.
 Read references/customer-review.md.
 
 Example:
@@ -102,6 +106,51 @@ def timing_lines(comparison):
     return lines
 
 
+KIND = {"queries": "query", "actions": "execute-sql", "indexes": "index"}
+
+
+def query_lines(before, after):
+    if not before:
+        return ["Not measured. Run time-queries.mjs on the test user's database (references/customer-review.md)."]
+    total = lambda t, kind: round(sum(r.get("ms") or 0 for r in t.get(kind, [])), 1)
+    lines = []
+    for kind, label in (("queries", "Queries"), ("actions", "execute-sql steps"), ("indexes", "Index builds")):
+        b = total(before, kind)
+        lines.append(f"- {label}: {len(before.get(kind, []))}, {b} ms in total" + (f" → {total(after, kind)} ms" if after else ""))
+    meta = before.get("meta", {})
+    lines += ["", f"Host timings on {meta.get('host', 'the host')} against {meta.get('rows', '?')} rows; a phone is several times slower."]
+    moved = [r for r in (after or {}).get("comparison", []) if r["verdict"] != "same"]
+    if after:
+        lines.append(f"\n{sum(r['verdict'] == 'faster' for r in moved)} faster, {sum(r['verdict'] == 'SLOWER' for r in moved)} slower, "
+                     f"{len(after.get('comparison', [])) - len(moved)} the same.")
+        rows = moved[:12]
+        head = "| What | Where | Before | After | Change |"
+        body = [f"| {KIND[r['kind']]} | `{r['where']}` | {r['before_ms']} ms | {r['after_ms']} ms | {r['change_pct']}% |" for r in rows]
+    else:
+        rows = sorted([dict(r, kind=k) for k in ("queries", "actions") for r in before.get(k, []) if r.get("ms") is not None],
+                      key=lambda r: -r["ms"])[:8]
+        head = "| What | Where | Median | Rows |"
+        body = [f"| {KIND[r['kind']]} | `{r['where']}` | {r['ms']} ms | {r.get('rows', '-')} |" for r in rows]
+    if rows:
+        lines += ["", head, "| --- | --- | ---: | ---: |" + (" ---: |" if after else "")] + body
+    return lines
+
+
+def screen_lines(pre, post):
+    if not pre:
+        return ["Not measured. Run time-screens.py with a screens.json (references/customer-review.md)."]
+    fmt = lambda v: "-" if v is None else f"{v / 1000:.2f} s"
+    if post and post.get("comparison"):
+        lines = ["| Screen | Before | After | Change | |", "| --- | ---: | ---: | ---: | --- |"]
+        lines += [f"| {r['screen']} | {fmt(r['before_ms'])} | {fmt(r['after_ms'])} | "
+                  f"{'-' if r['change_pct'] is None else str(r['change_pct']) + '%'} | {r['verdict']} |" for r in post["comparison"]["rows"]]
+    else:
+        lines = ["| Screen | Median | Spread |", "| --- | ---: | ---: |"]
+        lines += [f"| {n} | {fmt(s['median_ms'])} | {'-' if s['spread_ms'] is None else str(s['spread_ms']) + ' ms'} |" for n, s in pre["screens"].items()]
+    return lines + ["", f"Tap to ready element on {pre['device']}, {pre['runs']} runs a screen; includes datasources, "
+                        "expressions and rendering, plus Maestro's overhead."]
+
+
 def report(folder, solution=None):
     before = findings(read(folder, "before", "static.json"), read(folder, "before", "plans.json"))
     after_static, after_plans = read(folder, "after", "static.json"), read(folder, "after", "plans.json")
@@ -110,7 +159,11 @@ def report(folder, solution=None):
     changes = read(folder, "changes.json") or []
     title = "Performance review" + (f": {solution}" if solution else "")
     lines = [f"# {title}", ""]
-    lines += ["## Load time", ""] + timing_lines(comparison) + [""]
+    timings_before, timings_after = read(folder, "before", "timings.json"), read(folder, "after", "timings.json")
+    screens_pre, screens_post = read(folder, "screens", "pre.json"), read(folder, "screens", "post.json")
+    lines += ["## Sync", ""] + timing_lines(comparison) + [""]
+    lines += ["## Queries and actions", ""] + query_lines(timings_before, timings_after) + [""]
+    lines += ["## Screens", ""] + screen_lines(screens_pre, screens_post) + [""]
     lines += ["## Findings by section", ""]
     pri = (read(folder, "before", "static.json") or {}).get("byPriority")
     if pri:
@@ -139,6 +192,11 @@ def report(folder, solution=None):
               "- Confirm large wins on the slowest supported device with production-sized data."]
     if not comparison:
         lines.append("- No before/after load timing was recorded.")
+    if not timings_after:
+        lines.append("- Query and action times were not compared before and after.")
+    if not (screens_post and screens_post.get("comparison")):
+        lines.append("- Screen open times were not compared before and after.")
+    lines.append("- Expressions have no runtime timing; their cost shows only inside screen open time.")
     return "\n".join(lines) + "\n"
 
 

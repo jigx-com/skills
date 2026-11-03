@@ -220,6 +220,26 @@ class ReviewReportTest(unittest.TestCase):
         self.assertIn("| B | Queries and indexes | queries with full scans | 5 | 1 |", text)
         self.assertIn("- Index orders by reference (x.jigx)", text)
         self.assertIn("| entry: sync-base/a | 5 s | 2 s | -60.0% |", text)
+        self.assertIn("Screen open times were not compared", text)
+
+    def test_query_and_screen_timings(self):
+        self.write("before/static.json", {"byCode": {}})
+        os.makedirs(os.path.join(self.dir, "screens"))
+        self.write("before/timings.json", {"meta": {"host": "M2", "rows": 900},
+                                           "queries": [{"where": "datasources/a", "ms": 40, "rows": 12}], "actions": [], "indexes": []})
+        self.write("screens/pre.json", {"device": "sim", "runs": 3, "screens": {"list": {"median_ms": 2100, "spread_ms": 90}}})
+        baseline = rr.report(self.dir)
+        self.assertIn("- Queries: 1, 40 ms in total", baseline)
+        self.assertIn("| query | `datasources/a` | 40 ms | 12 |", baseline)
+        self.assertIn("| list | 2.10 s | 90 ms |", baseline)
+        self.write("after/timings.json", {"queries": [{"where": "datasources/a", "ms": 8}], "actions": [], "indexes": [],
+                                          "comparison": [{"kind": "queries", "where": "datasources/a", "before_ms": 40, "after_ms": 8, "change_pct": -80, "verdict": "faster"}]})
+        self.write("screens/post.json", {"device": "sim", "runs": 3, "screens": {}, "comparison": {"rows": [
+            {"screen": "list", "before_ms": 2100, "after_ms": 1500, "change_pct": -28.6, "verdict": "faster"}]}})
+        text = rr.report(self.dir)
+        self.assertIn("- Queries: 1, 40 ms in total → 8 ms", text)
+        self.assertIn("| query | `datasources/a` | 40 ms | 8 ms | -80% |", text)
+        self.assertIn("| list | 2.10 s | 1.50 s | -28.6% | faster |", text)
 
 
 if __name__ == "__main__":

@@ -41,17 +41,25 @@ the request:
 
 Follow `references/customer-review.md`:
 
-1. Confirm the solution, the **test** solution to publish to, the journey to time and
-   the test data.
-2. Baseline: static scan and plan check into `perf-review/before/`, three timed loads
-   with `track-load.py` (`pre-1..3`).
-3. Present the overview (`review-report.py`) and the proposed changes grouped by
-   section A–H, each with file, reason, expected effect, risk and verification.
-4. **Stop and ask which sections to apply.** Change nothing before the user agrees.
-5. Apply approved sections one commit each, rebuild and check after each.
-6. Measure again into `perf-review/after/` and `post-1..3`, run `compare-runs.py` and
-   `review-report.py`, and show `perf-review/report.md`: times before and after,
-   findings per section, changes applied, what was not verified.
+1. Confirm the solution and whether it is YAML or TypeScript SDK, the **test**
+   solution to publish to, the sign-in sync and the 3–6 screens to time, and the test
+   data.
+2. **Audit**: static scan and plan check into `perf-review/before/`.
+3. **Time the current solution** after publishing it to the test solution: sync
+   (`track-load.py`, three runs), every query and `execute-sql` action on the test
+   user's synced database (`time-queries.mjs`), and screen open times (`time-screens.py`
+   with Maestro, three runs a screen). Expressions have no runtime timing; they show in
+   screen time and are located by the audit.
+4. **Propose** with the overview (`review-report.py`): changes grouped by section A–H,
+   ordered by priority, each written as a diff in the solution's language (`.jigx` or
+   `src/*.ts`, `references/fixes-by-language.md`) with file, reason, measured cost,
+   expected effect, risk and the timing that should move.
+5. **Stop and ask which sections to apply.** Change nothing before the user agrees.
+6. Apply approved sections one commit each, rebuild and check after each, publish to the
+   same test solution and **time everything again** (`post`); compare with
+   `compare-runs.py`, `time-queries.mjs --baseline` and `time-screens.py --compare`, and
+   show `perf-review/report.md` with feedback: what got faster, what did not move, any
+   regression, what was not verified.
 
 ## Audit
 
@@ -127,8 +135,9 @@ Follow `references/customer-review.md`:
 - `references/recipe-index.md` - when to read each reference.
 - `references/measuring.md` - attributing cost, host vs device, bytes vs rows, the
   debug bridge, where the time goes on blob-carrying JSON columns.
-- `references/customer-review.md` - the review flow: baseline, proposal by section,
-  approval, apply, re-measure, report.
+- `references/customer-review.md` - the review flow: audit, time, propose by section,
+  approval, apply, publish, time again, report.
+- `references/fixes-by-language.md` - each finding's fix in YAML and in TypeScript SDK.
 - `references/run-and-track.md` - live load timeline in the simulator, three runs a
   side, medians and the slowdown threshold, what can be timed where.
 - `references/indexes-and-execute-sql.md` - expression indexes, matching predicate
@@ -154,8 +163,14 @@ Follow `references/customer-review.md`:
   against the shipped indexes: full scans, indexes used and unused, CI guard file.
 - `scripts/track-load.py` - read-only live tracker of a sync or load in the iOS
   Simulator: scopes, entries, queue, row counts, slow-datasource log lines, waterfall.
-- `scripts/review-report.py` - the review report: load times, findings per section
-  before and after, changes applied, what was not verified.
+- `scripts/time-queries.mjs` - every datasource query, `execute-sql` step (rolled back)
+  and index build timed on a copy of a device database, parameters sampled from the
+  data; `--baseline` compares with an earlier run. Node 22.5+.
+- `scripts/time-screens.py` - screen open times (tap to ready element) in the iOS
+  Simulator through generated Maestro flows; `--compare` flags only changes beyond run
+  noise.
+- `scripts/review-report.py` - the review report: sync, query, action and screen times
+  before and after, findings per section, changes applied, what was not verified.
 - `scripts/compare-runs.py` - medians and per-scope and per-entry change between
   before and after runs, with warnings for weak comparisons.
 

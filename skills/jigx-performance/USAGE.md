@@ -115,7 +115,8 @@ For an SDK project, add the install and build steps for both checkouts and point
 
 ## Other modes
 
-- `/jigx-performance review <solution>`: the full customer review, with timed loads
-  before and after (README, "Review a customer solution").
+- `/jigx-performance review <solution>`: audit, time the sync, queries, actions and
+  screens, propose fixes in YAML or TypeScript by section and priority, apply what you
+  approve, publish and time again (README, "Review a customer solution").
 - `/jigx-performance measure <test solution>`: time one change in the simulator.
 - `/jigx-performance build`: guidance while writing new queries and lists.

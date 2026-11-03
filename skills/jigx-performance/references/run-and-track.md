@@ -12,13 +12,30 @@ compares runs. Both are read-only on the device database.
 | Slow datasources and errors during the run | `track-load.py` tails the simulator's `jigx.log.db` for WARNING/ERROR lines such as `Timeout for first snapshot` | iOS Simulator |
 | Same signals on a phone | `jigx_debug` `track_logs` before the run, read after | real device |
 | Request start, finish and overlap per sync wave | a proxy capture (e.g. Proxyman HAR export) of the test solution only | simulator or device |
-| Screen ready: tap to the first row visible | a UI flow (e.g. Maestro) that taps and waits for a stable accessibility id | simulator |
+| Screen ready: tap to the first row visible, including datasources, expressions and rendering | `time-screens.py`, a generated Maestro flow per screen | simulator |
+| Every query, `execute-sql` step and index build on real data | `time-queries.mjs` on a copy of the test user's database | host |
 | One query's cost at 1x and 10x | `profile-query.py` on an exported database | host |
 
 Jigx exposes no render timing. A screen's time is tap to its ready element, measured by
 the UI flow, not by the runtime. A real phone's files are not reachable from the host
 and `query_device_db` takes about 5 s per call, so a device gives logs and spot checks,
 not a timeline.
+
+**Screens.** `time-screens.py` runs one Maestro flow per screen: setup steps (untimed),
+then the tap, then a wait for the ready element. Pick a ready element that only
+appears once the data is there (a row number, not the title). Maestro's own overhead is
+about 2.5–3 s for a static iOS screen on an M2 Pro and varies by ~300 ms; two runs of an
+identical build once differed by 11%. So a screen counts as faster or slower only when
+every run on one side beats every run on the other and the medians differ by 250 ms.
+Put a static screen in the spec as a control.
+
+**Queries and actions.** `time-queries.mjs` copies the database with `VACUUM INTO`
+(read-only on the original), builds the shipped indexes on the copy, then times every
+query and every `execute-sql` step inside a transaction it rolls back. Each parameter
+compared with `= @p` gets a real value sampled from that column; others are NULL and
+marked. Run it on the database the test user's sync just filled, the same one before
+and after: on a near-empty database every query takes a fraction of a millisecond and
+nothing ranks.
 
 ## Run
 

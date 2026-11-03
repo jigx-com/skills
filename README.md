@@ -178,26 +178,34 @@ run:
 /jigx-performance review path/to/solution
 ```
 
-Claude asks once for the **test** solution to publish to, the journey to time (sign-in
-and initial sync, a refresh, or a screen) and the test data, then:
+Works on YAML solutions (the folder with `index.jigx`) and TypeScript SDK projects.
+Claude asks once for the **test** solution to publish to, the screens to time and the
+test data, then:
 
-1. **Measures the baseline.** It scans the generated solution and records three timed
-   loads in the iOS Simulator, showing the sync live as it runs.
-2. **Gives an overview and proposes changes.** Time to ready, the slowest sync steps,
-   and findings grouped into sections A–H (measuring, queries and indexes, lists, state
-   and expressions, screens and start-up, sync, writes and duplicates, security and
-   logs). Each proposed change says where, why, the expected effect and the risk.
-3. **Waits for your approval.** Nothing changes until you say which sections to apply.
-4. **Applies the approved sections**, one commit per section, rebuilding and checking
-   after each.
-5. **Measures again and reports.** Three more timed loads with the same data, then
-   `perf-review/report.md`: time to ready before and after, which steps got faster or
-   slower, slow-datasource warnings and errors, findings per section before and after,
-   and what was not verified.
+1. **Audits the solution.** A prioritized list of sync and performance problems, each
+   with where it is and the fix.
+2. **Times the current solution** in the iOS Simulator:
+   - **sync**: time to ready and every scope and step, three sign-ins
+   - **queries**: every datasource query, on the test user's synced data
+   - **actions**: every `execute-sql` step and index build on the same data
+   - **screens**: tap to ready for each screen you name, three runs each. This includes
+     the screen's datasources, expressions and rendering; Jigx has no separate
+     expression timing.
+3. **Proposes fixes** grouped into sections A–H (measuring, queries and indexes, lists,
+   state and expressions, screens and start-up, sync, writes and duplicates, security
+   and logs), ordered by priority. Each fix is a diff in the solution's language
+   (`.jigx` for YAML, `src/*.ts` for SDK) with why, the measured cost, the expected
+   effect and the risk.
+4. **Waits for your approval.** Nothing changes until you say which sections to apply.
+5. **Applies, publishes and times again**, one commit per section, then every timing
+   from step 2 with the same data, and writes `perf-review/report.md`: sync, queries,
+   actions and screens before and after, what got faster, slower or stayed the same,
+   findings per section, and feedback on which changes paid off.
 
-Requirements: Node 18+, Python 3.9+, Xcode with an iOS Simulator, the Jigx app in the
-simulator, and the `jigx_debug` MCP server for publishing to the test solution. Timing
-runs never touch production; simulator times show relative change, so confirm big wins
+Requirements: Node 22.5+, Python 3.9+, Xcode with an iOS Simulator, the Jigx app in the
+simulator, Maestro (and Java 17+) for screen times, and the `jigx_debug` MCP server for
+publishing SDK projects (YAML solutions publish with Jigx Builder). Timing runs never
+touch production; simulator and host times show relative change, so confirm big wins
 on a real device. Results stay in `perf-review/` in the solution project.
 
 Other modes: `/jigx-performance audit` (findings only), `/jigx-performance build` (while
@@ -238,6 +246,10 @@ python3 skills/jigx-performance/scripts/check-plans.py /path/to/solution --scans
 node --test skills/jigx-performance/scripts/check-performance.test.mjs
 python3 -m unittest skills/jigx-performance/scripts/test_profile_query.py
 python3 -m unittest skills/jigx-performance/scripts/test_load_tools.py
+node skills/jigx-performance/scripts/time-queries.mjs /path/to/solution --db device.db --report timings.md > timings.json
+python3 skills/jigx-performance/scripts/time-screens.py screens.json --label pre --out perf-review/screens
+node --test skills/jigx-performance/scripts/time-queries.test.mjs
+python3 -m unittest skills/jigx-performance/scripts/test_time_screens.py
 python3 skills/jigx-performance/scripts/review-report.py perf-review --solution <name>
 ```
 
