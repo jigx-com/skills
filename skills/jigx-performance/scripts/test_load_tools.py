@@ -67,8 +67,11 @@ class TrackLoadTest(unittest.TestCase):
             if i == 1:
                 msg = {"level": "WARNING", "category": "datasource",
                        "message": "#3 'orders-list' Timeout for first snapshot, querying initial local results... Bearer abc.def"}
-                log.execute("INSERT INTO _logMessages (timestamp, state, message) VALUES (?, 'read', ?)",
-                            (int(time.time() * 1000), json.dumps(msg)))
+                hashed = {"level": "WARNING", "category": "get-entity-id",
+                          "message": "Performance Issue: Missing ID or value of entity (4 times) -> using hash function"}
+                for m in (msg, hashed):
+                    log.execute("INSERT INTO _logMessages (timestamp, state, message) VALUES (?, 'read', ?)",
+                                (int(time.time() * 1000), json.dumps(m)))
                 log.commit()
             time.sleep(0.12)
         conn.close()
@@ -86,6 +89,7 @@ class TrackLoadTest(unittest.TestCase):
         self.assertEqual(summary["final_counts"], {"orders": 3})
         self.assertEqual(summary["snapshot_timeouts"], {"orders-list": 1})
         self.assertEqual(summary["log_errors"], 0)  # the ERROR line predates arming
+        self.assertEqual(summary["hash_fallbacks"], 4)
         self.assertGreater(summary["first_start_to_ready_s"], 0)
         a, b = summary["entries"]["sync-base/a"], summary["entries"]["sync-base/b"]
         self.assertLess(a["start_s"], b["start_s"])

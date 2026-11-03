@@ -20,6 +20,8 @@ change needs a builder option you have not seen in the project, check the `jigx`
 | `unindexed-predicate` | Add `CREATE INDEX IF NOT EXISTS idx_<table>_<field> ON [<table>] (<exact predicate text>)` to the index `execute-sql` step | Add `{ statement: "CREATE INDEX IF NOT EXISTS …" }` to the `statements` of the `executeSql({...})` index step |
 | `ddl-invalidates-datasources` | In the index step, `entities: [default/debug]` (a table nothing binds to), and gate each statement on its table existing | Same in `executeSql({ entities: ['default/debug'], ... })` |
 | `ddl-ungated` | Add `when:` reading `sqlite_master` for the table, or list the table in `entities:` | The same `when` on the action, or the table in `entities` |
+| `or-across-keys` | Split the `OR` into one `UNION` branch per key, each with a matching index, then join back for the existing tie-break | Same change inside `.query(\`…\`)`; add the missing indexes to `executeSql({...})` |
+| `order-by-unindexed` | Index exactly the sort expression | Same, in the index step's `statements` |
 | `index-not-idempotent` | `CREATE INDEX IF NOT EXISTS` | Same, in the statement string |
 | `execute-sql-entities` | Add `entities: [default/debug]` | Add `entities: ['default/debug']` to `executeSql({...})` |
 
@@ -38,6 +40,7 @@ is removed (`indexes-and-execute-sql.md`).
 | `list-custom-component-item` | Replace the `component.custom-component` item with `component.list-item` (title, subtitle, tags, left/right elements) | Replace the custom component with `addControl.listItem({...})` plus `.addTag`, `.leftElement`, `.rightElement` |
 | `component-list-for-data` | Make the screen a `jig.list` with `data:` and `item:` | Use `app.addScreen.list({...})` for the screen |
 | `list-dynamic-height` | Remove `hasDynamicHeight: true` | Remove `hasDynamicHeight` from the options |
+| `datasource-no-id` | Select `id` (or `… AS id`) | Same inside `.query(\`…\`)` |
 
 ## D · State and expressions
 
@@ -45,12 +48,17 @@ is removed (`indexes-and-execute-sql.md`).
 | --- | --- | --- |
 | `filter-inside-map` | In `expressions:`, build a lookup once (`$merge($map(view, function($v){ {$v.id: $v} }))`) and read `$lookup[$x.id]` inside the `$map` | The same JSONata in `screen.addExpression(...)`; the expression strings are identical |
 | `datasource-not-equals` | `$count(@ctx.datasources.x[field='X']) = 0` | The same JSONata string |
+| `heavy-expression` | Bind once: `=( $rows := @ctx.datasources.x; … $rows[step='a'] … )`, or count in SQL | The same JSONata in the expression string |
+| `solution-state-in-global-datasource` | Move the datasource into the jig and pass the value as a jig input | Move it to `screen.addDatasource` and pass an input |
+| `solution-state-in-handler` | Write the state only when the value changes (`when:` on the set-state), or use jig state | Same `when` on the set-state action |
 
 ## E · Screens and start-up
 
 | Finding | YAML | TypeScript SDK |
 | --- | --- | --- |
 | `unused-datasource` | Delete `datasources/<name>.jigx`, or move it into the one jig that uses it | Delete `src/datasources/<name>.ts` and its `import` and `register…(app)` lines in `src/app.ts`; or move it to `screen.addDatasource` |
+| `watched-table-unread` | Remove the table from `entities:` | Remove its `.entity(...)` call |
+| `heavy-focus` | Move the sync to sign-in or pull-to-refresh, or add `when:` (e.g. data older than N minutes) to the `onFocus` action | The same on the screen's `onFocus` action |
 
 ## F · Sync
 
@@ -59,6 +67,10 @@ is removed (`indexes-and-execute-sql.md`).
 | `synced-table-unread` | Remove the entity from `action.sync-entities` (after checking functions and scripts) | Remove it from the `.syncEntities({...})` call |
 | `sync-full-pull` | Pass the newest local modified date as the function's filter parameter and merge (`jigx` `sync-orchestration.md`) | Same parameters in `.syncEntities({ ..., parameters })` |
 | `sync-no-select` | Add `$select` with the fields the app reads to the function's parameters | The same `$select` in the function definition under `src/functions` |
+| `sequential-sync-steps` | Group calls by the local tables they read; run each group in an `action.action-list` without `isSequential`, waves in order (`jigx` `sync-orchestration.md`) | `list({ concurrency: 'parallel' })` per wave, waves inside a sequential list |
+| `table-change-unguarded`, `table-change-hot-guard` | Add `when:` on a cheap flag (`=$syncComplete`), with datasource counts after it | The same `when` on the handler |
+| `double-scheduled-action` | Start the action from the handler only, and make its guard reject a run in progress | Remove the direct call from the action that writes the table |
+| `file-transfer-sequential` | `processingType: parallel` on the download or upload | `processingType: 'parallel'` in the execute-entity options |
 | `large-synced-table` | Filter to the user (branch, assignee, date window) or sync on demand | Same, in the function and the sync call |
 
 ## After each change

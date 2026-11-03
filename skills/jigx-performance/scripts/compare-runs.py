@@ -78,9 +78,10 @@ def compare(before, after, threshold=10.0, min_change=0.5):
     timeouts = {side: sum(sum(r.get("snapshot_timeouts", {}).values()) for r in runs)
                 for side, runs in (("before", before), ("after", after))}
     errors = {side: sum(r.get("log_errors", 0) for r in runs) for side, runs in (("before", before), ("after", after))}
+    hashed = {side: sum(r.get("hash_fallbacks", 0) for r in runs) for side, runs in (("before", before), ("after", after))}
     return {"threshold_pct": threshold, "min_change_s": min_change, "before_runs": [r["label"] for r in before],
             "after_runs": [r["label"] for r in after], "rows": rows, "warnings": warnings,
-            "snapshot_timeouts": timeouts, "log_errors": errors,
+            "snapshot_timeouts": timeouts, "log_errors": errors, "hash_fallbacks": hashed,
             "machine": sorted(m or "?" for m in machines)}
 
 
@@ -103,7 +104,8 @@ def markdown(report):
                      f"{fmt(r['change_pct'], '%')} | {r['verdict']} |")
     lines += ["", f"Timeout for first snapshot: before {report['snapshot_timeouts']['before']}, "
                   f"after {report['snapshot_timeouts']['after']}. "
-                  f"Log errors: before {report['log_errors']['before']}, after {report['log_errors']['after']}.",
+                  f"Log errors: before {report['log_errors']['before']}, after {report['log_errors']['after']}. "
+                  f"Rows hashed for lack of an id: before {report['hash_fallbacks']['before']}, after {report['hash_fallbacks']['after']}.",
               "", "Simulator timings show relative change on this machine, not device timings."]
     return "\n".join(lines) + "\n"
 

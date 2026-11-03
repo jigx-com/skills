@@ -90,12 +90,18 @@ What it checks:
 | Area | Finds | Priority |
 | --- | --- | --- |
 | Sync | tables synced that nothing reads; full pulls with no modified-date filter; OData pulls without `$select`; tables over 5 MB or 5,000 rows | medium; full pulls and `$select` low unless `--db` shows big tables |
-| Unnecessary loads | global datasources nothing uses | medium |
-| Indexes | index steps that re-run every bound datasource or roll back on a fresh install; filters no index matches | high (medium for a one-table step); filters low unless 1,000+ rows |
+| Sync behaviour | 4+ sync calls run one after another (parallel waves); table-change handlers with no guard, or a guard that reads datasources on sync tables; an action started by a handler and by an action that writes the handler's table; file transfers left sequential | medium (an unguarded handler on a sync table is high) |
+| Unnecessary loads | global datasources nothing uses; tables a datasource watches but does not read; a sync on every screen focus | medium |
+| Indexes | index steps that re-run every bound datasource or roll back on a fresh install; filters and sorts no index matches; an `OR` across keys of one table with an unindexed key | high (medium for a one-table step); per-row `OR` high, otherwise medium; filters and sorts low unless 1,000+ rows |
 | Lists | datasource reads per row; searches with no `LIMIT`; a list datasource with no `id`; `instanceId` on list items; custom components as items | medium |
-| List components | `component.list` bound to data (use `jig.list`); `hasDynamicHeight` | low |
+| List components | `component.list` bound to data (use `jig.list`); `hasDynamicHeight`; any other datasource with no `id` | low |
 | Query rewriting | `rewriteQuery: false` with `'$.field'` shorthand (wrong data); `rewriteQuery` left on | high; low |
-| Expressions | datasource filters inside `$map`; `!=` against a datasource field | high; low |
+| Expressions and state | datasource filters inside `$map`; one expression filtering datasources 10+ times; solution state as a global datasource parameter; solution state written by a table-change handler; `!=` against a datasource field | high; medium; medium; low; low |
+
+The sync-behaviour, `OR` and expression checks come from measured fixes: parallel
+waves took an initial sync from 35 s to 14 s, splitting an `OR` lookup per key took a
+pre-sync step from 6.5 s to 30 ms, and scheduling file downloads once and in parallel
+took them from 117 s to 24 s.
 
 ## Findings you can accept
 

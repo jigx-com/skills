@@ -4,10 +4,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {spawnSync} from 'node:child_process';
-import {checkPerformance, filterPredicates, parseCreateIndex, normaliseExpr, loadSolution, markdownReport, newFindings, outerColumns, sdkSources, shorthandPaths, where} from './check-performance.mjs';
+import {checkPerformance, filterPredicates, parseCreateIndex, normaliseExpr, loadSolution, markdownReport, newFindings, orAcrossKeys, orderByTerms, outerColumns, sdkSources, shorthandPaths, where} from './check-performance.mjs';
 
-// Fixtures hold unreferenced global datasources and leave rewriteQuery on; those checks have their own tests.
-const NOISE = new Set(['unused-datasource', 'rewrite-query-on']);
+// Fixtures are minimal (no id, rewriteQuery on, loose entities); those checks have their own tests.
+const NOISE = new Set(['unused-datasource', 'rewrite-query-on', 'datasource-no-id', 'watched-table-unread', 'order-by-unindexed']);
 const codes = (app, opts) => checkPerformance(app, opts).findings.map(x => x.code).filter(c => !NOISE.has(c)).sort();
 const ds = (query, entities = ['default/fileUploadQueue']) => ({type: 'datasource.sqlite', options: {entities, query}});
 const PRED = "LOWER(COALESCE(json_extract(q.data, '$.status'), ''))";
@@ -210,7 +210,7 @@ test('outer SELECT columns: aliases, qualified names, star, CTEs and subqueries'
 test("rewriteQuery: false with '$.' shorthand is an error; json_* path arguments are not shorthand", () => {
   assert.deepEqual(shorthandPaths("SELECT '$.name' AS name, json_extract(data, '$.a'), json_set(x, '$.b', 1) FROM t WHERE COALESCE('$.c', 0) = 1 -- '$.d'"), ["'$.name'", "'$.c'"]);
   const ds = (query, rewriteQuery) => ({type: 'datasource.sqlite', options: {entities: ['t'], query, ...(rewriteQuery !== undefined && {rewriteQuery})}});
-  const all = app => checkPerformance(app).findings.map(f => f.code).filter(c => c !== 'unused-datasource');
+  const all = app => checkPerformance(app).findings.map(f => f.code).filter(c => !['unused-datasource', 'datasource-no-id'].includes(c));
   assert.deepEqual(all({datasources: {a: ds("SELECT '$.name' AS name FROM t", false)}}), ['rewrite-query-shorthand']);
   assert.deepEqual(all({datasources: {a: ds("SELECT json_extract(data, '$.name') AS name FROM t", false)}}), []);
   assert.deepEqual(all({datasources: {a: ds("SELECT '$.name' AS name FROM t")}}), ['rewrite-query-on']);
@@ -237,4 +237,84 @@ test('lists: datasource without id, instanceId on items, custom items, component
     'list-item-instance-id jigs/a › item',
     'list-no-id jigs/a',
   ]);
+});
+
+test('OR across keys of one table: per row is high, a top-level filter medium, one key or AND is not', () => {
+  const perRow = "SELECT q.id FROM queue q JOIN header h ON (h.id = q.k OR json_extract(h.data, '$.ApptID') = q.k OR trim(json_extract(h.data, '$.Nbr')) = q.k)";
+  assert.deepEqual(orAcrossKeys(perRow).map(o => [o.keys.length, o.perRow]), [[3, true]]);
+  assert.deepEqual(orAcrossKeys("SELECT id FROM h WHERE id = @a OR json_extract(data, '$.Nbr') = @a").map(o => o.perRow), [false]);
+  assert.deepEqual(orAcrossKeys("SELECT id FROM h WHERE json_extract(data, '$.S') = 'a' OR json_extract(data, '$.S') = 'b'"), []);
+  assert.deepEqual(orAcrossKeys("SELECT id FROM h WHERE json_extract(data, '$.status') = 'x' OR json_extract(data, '$.retry') = 1"), [], 'constants are filters, not key lookups');
+  assert.deepEqual(orAcrossKeys("SELECT 1 FROM q WHERE EXISTS (\n      SELECT 1 FROM c WHERE trim(c.id) = q.k OR trim(json_extract(c.data, '$.K')) = q.k)").map(o => o.perRow), [true]);
+  assert.deepEqual(orAcrossKeys("SELECT id FROM h WHERE (id = @a AND x = 1) OR json_extract(data, '$.Nbr') = @a"), []);
+  const cte = "WITH k AS (SELECT id FROM h WHERE id = @a OR json_extract(data, '$.Nbr') = @a) SELECT * FROM k";
+  assert.deepEqual(orAcrossKeys(cte).map(o => o.perRow), [false], 'a CTE body is not a correlated subquery');
+  const app = {datasources: {a: ds(perRow, ['queue', 'header']), b: ds("SELECT id FROM h WHERE id = @a OR json_extract(data, '$.Nbr') = @a", ['h'])}};
+  const got = checkPerformance(app).findings.filter(f => f.code === 'or-across-keys').map(f => `${f.where} ${f.priority}`);
+  assert.deepEqual(got, ['datasources/a › options.query high', 'datasources/b › options.query medium']);
+});
+
+test('ORDER BY on a JSON field without an index, watched tables the query does not read, datasources without id', () => {
+  assert.deepEqual(orderByTerms("SELECT id FROM t ORDER BY json_extract(o.data, '$.Date') DESC, id LIMIT 5"), [normaliseExpr("json_extract(o.data, '$.Date')")]);
+  const app = {datasources: {
+    a: ds("SELECT id FROM [orders] ORDER BY json_extract(data, '$.Date') DESC", ['default/orders', 'customers']),
+    b: ds("SELECT json_extract(data, '$.n') AS n FROM [orders]", ['orders']),
+    c: ds('SELECT count(*) AS n FROM [orders]', ['orders']),
+    d: ds("SELECT json_extract(data, '$.n') AS n FROM [orders] LIMIT 1", ['orders']),
+  }, actions: {i: {type: 'action.execute-sql', options: {entities: ['default/debug'], statements: [
+    "CREATE INDEX IF NOT EXISTS idx_b ON [orders] (json_extract(data, '$.Other'))"]}}}};
+  const got = checkPerformance(app).findings.filter(f => ['order-by-unindexed', 'watched-table-unread', 'datasource-no-id'].includes(f.code)).map(f => `${f.code} ${f.where}`).sort();
+  assert.deepEqual(got, ['datasource-no-id datasources/b', 'order-by-unindexed datasources/a › options.query', 'watched-table-unread datasources/a › options.entities']);
+});
+
+test('sync behaviour: handlers, double scheduling, sequential calls, file transfers, focus syncs', () => {
+  const sync = {type: 'action.sync-entities', options: {provider: 'DATA_PROVIDER_REST', entities: ['orders']}};
+  const run = id => ({type: 'action.execute-action', options: {action: id}});
+  const app = {
+    onTableChanged: [
+      {table: '_syncStatus', action: {type: 'action.action-list', options: {actions: [run('load')]}}},
+      {table: '_syncScope', when: '=$count(@ctx.datasources.queue) > 0', action: {type: 'action.action-list', options: {actions: [{type: 'action.set-state', options: {state: '=@ctx.solution.state.busy', value: true}}]}}},
+      {table: 'orders', when: '=@ctx.solution.state.ready', action: {type: 'action.action-list', options: {actions: []}}},
+    ],
+    actions: {
+      load: {action: {type: 'action.action-list', options: {isSequential: true, actions: [sync, sync, sync, sync]}}},
+      after: {action: {type: 'action.action-list', options: {actions: [run('load'), {type: 'action.execute-entity', options: {method: 'download', provider: 'DATA_PROVIDER_DYNAMIC'}}]}}},
+      writer: {action: {type: 'action.action-list', options: {actions: [{type: 'action.execute-sql', options: {entities: ['_syncStatus'], statements: ['UPDATE _syncStatus SET x = 1']}}, run('load')]}}},
+    },
+    jigs: {
+      a: {type: 'jig.default', onFocus: run('load')},
+      b: {type: 'jig.default', onFocus: {type: 'action.action-list', options: {actions: [{...sync, when: '=$stale'}]}}},
+    },
+  };
+  const got = checkPerformance(app).findings.map(f => `${f.code} ${f.where} ${f.priority}`).filter(x => !/unused-datasource|synced-table-unread/.test(x)).sort();
+  assert.deepEqual(got, [
+    'double-scheduled-action actions/load medium',
+    'file-transfer-sequential actions/after › action.options.actions.1 medium',
+    'heavy-focus jigs/a › onFocus medium',
+    'sequential-sync-steps actions/load › action medium',
+    'solution-state-in-handler index › onTableChanged.1.action.options.actions.0 low',
+    'table-change-hot-guard index › onTableChanged.1 medium',
+    'table-change-unguarded index › onTableChanged.0 high',
+  ]);
+});
+
+test('expressions: many datasource filters in one expression; solution state in a global datasource', () => {
+  const filters = Array.from({length: 10}, (_, i) => `$count(@ctx.datasources.sync[step='${i}'])`).join(' + ');
+  const app = {
+    datasources: {g: {type: 'datasource.sqlite', options: {entities: ['t'], query: 'SELECT id FROM t WHERE x = @x', rewriteQuery: false,
+      queryParameters: {x: '=@ctx.solution.state.branch'}}}},
+    jigs: {a: {type: 'jig.default', title: '=' + filters}},
+  };
+  const got = checkPerformance(app).findings.map(f => f.code).filter(c => !['unused-datasource', 'unindexed-predicate'].includes(c)).sort();
+  assert.deepEqual(got, ['heavy-expression', 'solution-state-in-global-datasource']);
+});
+
+test('an OR with an index on every arm and a placeholder entity are not findings', () => {
+  const idx = {type: 'action.execute-sql', options: {entities: ['default/debug'], statements: [
+    "CREATE INDEX IF NOT EXISTS idx_nbr ON [h] (json_extract(data, '$.Nbr'))"]}};
+  const app = {datasources: {
+    a: ds("SELECT id FROM [h] WHERE id = @a OR json_extract(data, '$.Nbr') = @a", ['h']),
+    b: ds("SELECT date('now') AS id", ['dummy']),
+  }, actions: {idx}};
+  assert.deepEqual(checkPerformance(app).findings.filter(f => ['or-across-keys', 'watched-table-unread'].includes(f.code)), []);
 });

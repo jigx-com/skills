@@ -85,11 +85,15 @@ Follow `references/customer-review.md`:
    Every finding has a priority (high, medium, low), a section, where it is (file, then
    the path inside it), what is wrong and the recommended fix. `audit.md` groups them
    by priority and type. It covers sync (tables nothing reads, full pulls, missing
-   `$select`, large tables), unused global datasources, per-row datasource reads,
-   uncapped searches, list rules (an `id` in every list datasource, no `instanceId` on
-   items, built-in items, `jig.list`, fixed height), `rewriteQuery`, unindexed and
-   wrapped filters, `execute-sql` DDL risks and JSONata traps. Every finding is a lead to measure, not a verdict. Then list full scans and
-   unused indexes from the query planner:
+   `$select`, large tables), sync behaviour (sequential calls that could run in waves,
+   table-change handlers and their guards, actions started twice, sequential file
+   transfers, syncs on every focus), unused datasources and watched tables, per-row
+   datasource reads, uncapped searches, list rules (an `id` in every datasource, no
+   `instanceId` on items, built-in items, `jig.list`, fixed height), `rewriteQuery`,
+   unindexed, wrapped and `OR`-across-keys filters, unindexed sorts, `execute-sql` DDL
+   risks, heavy expressions, solution state and JSONata traps (`USAGE.md` lists them
+   with priorities). Every finding is a lead to measure, not a verdict. Then list full
+   scans and unused indexes from the query planner:
 
    ```sh
    python3 <skill-directory>/scripts/check-plans.py <solution> --scans-only

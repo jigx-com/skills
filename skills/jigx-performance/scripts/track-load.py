@@ -7,7 +7,9 @@ read-only (`?mode=ro`) and never writes to them. Every --interval seconds it rea
   * `_syncScope`: each scope's state and the state of each entry in `details`
   * the SDK `_commandQueue` size
   * row counts for any --table you name
-  * new WARNING/ERROR runtime log lines, e.g. "Timeout for first snapshot"
+  * new WARNING/ERROR runtime log lines, e.g. "Timeout for first snapshot", and the
+    runtime's "Missing ID or value of entity ... using hash function" (a datasource with
+    no id column, so every row is hashed)
 
 It prints one live line per change, appends every changed sample to
 <out>/<label>-samples.jsonl, and stops when the load is ready (every tracked scope
@@ -202,6 +204,8 @@ def summarise(label, db, samples, result, armed, ready_at, logs, final, scopes):
         m = re.search(r"'([^']+)' Timeout for first snapshot", row["message"])
         if m:
             snapshot[m.group(1)] = snapshot.get(m.group(1), 0) + 1
+    hashed = sum(int(m.group(1) or 1) for r in logs
+                 for m in [re.search(r"Missing ID or value of entity(?: \((\d+) times\))?", r["message"])] if m)
     return {
         "label": label,
         "machine": f"host {platform.node()} {platform.machine()} {platform.system()} (iOS Simulator)",
@@ -220,6 +224,7 @@ def summarise(label, db, samples, result, armed, ready_at, logs, final, scopes):
         "final_counts": final["counts"] if final else {},
         "snapshot_timeouts": snapshot,
         "log_errors": sum(1 for r in logs if r["level"] == "ERROR"),
+        "hash_fallbacks": hashed,
         "log_warnings": sum(1 for r in logs if r["level"] == "WARNING"),
         "sample_interval_note": "Entry times have the resolution of the sampling interval; scope durations use the runtime's own timestamps.",
     }
@@ -278,6 +283,8 @@ def track(db, label, out, tables=(), scopes=(), interval=0.25, settle=5.0, timeo
                     + waterfall(summary["entries"])), file=stream)
     if summary["snapshot_timeouts"]:
         print(f"Timeout for first snapshot: {summary['snapshot_timeouts']}", file=stream)
+    if summary.get("hash_fallbacks"):
+        print(f"Rows hashed for lack of an id: {summary['hash_fallbacks']}", file=stream)
     print(f"Saved {os.path.join(out, label + '-summary.json')}", file=stream, flush=True)
     return summary
 

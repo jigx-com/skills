@@ -181,6 +181,100 @@ export function shorthandPaths(sql) {
   return found;
 }
 
+// Equality arms of one OR group that test different keys of the same table, e.g.
+// `h.id = q.k OR json_extract(h.data, '$.ApptID') = q.k`. SQLite cannot use one index per arm
+// for such an OR, so it scans the table for every row it is evaluated for. Returns
+// [{keys, perRow}] where perRow means the OR sits in a JOIN ON or a correlated subquery.
+export function orAcrossKeys(sql) {
+  const masked = maskSql(sql);
+  const out = [], seen = new Set();
+  const KEY = /(?:\b(\w+)\.id\b|(?<![\w.])id\b|json_extract\s*\(\s*(?:(\w+)\.)?data\s*,)/i;
+  for (const m of masked.matchAll(/\bOR\b/gi)) {
+    // The enclosing parenthesised group, or the whole statement.
+    let start = 0, end = masked.length;
+    for (let i = m.index, depth = 0; i >= 0; i--) {
+      if (masked[i] === ')') depth++;
+      else if (masked[i] === '(' && depth-- === 0) { start = i + 1; break; }
+    }
+    for (let i = m.index, depth = 0; i < masked.length; i++) {
+      if (masked[i] === '(') depth++;
+      else if (masked[i] === ')' && depth-- === 0) { end = i; break; }
+    }
+    if (seen.has(start)) continue;
+    seen.add(start);
+    // Only the condition: after the group's last top-level WHERE/ON/HAVING, before ORDER/GROUP/LIMIT.
+    for (let i = start, depth = 0; i < end; i++) {
+      if (masked[i] === '(') depth++;
+      else if (masked[i] === ')') depth--;
+      else if (depth === 0 && /\W/.test(masked[i - 1] ?? ' ')) {
+        const kw = /^(WHERE|ON|HAVING)\b/i.exec(masked.slice(i, i + 7));
+        if (kw && i < m.index) start = i + kw[0].length;
+        else if (i > m.index && /^(ORDER\s+BY|GROUP\s+BY|LIMIT|UNION)\b/i.test(masked.slice(i, i + 9))) { end = i; break; }
+      }
+    }
+    const arms = [];
+    let from = start;
+    for (let i = start, depth = 0; i <= end; i++) {
+      if (masked[i] === '(') depth++;
+      else if (masked[i] === ')') depth--;
+      const atOr = depth === 0 && /^OR\b/i.test(masked.slice(i, i + 3)) && /\W/.test(masked[i - 1] ?? ' ');
+      if (i === end || atOr) { arms.push([from, i]); from = i + 2; }
+    }
+    if (arms.length < 2) continue;
+    const keys = new Map();
+    for (const [a, b] of arms) {
+      const arm = masked.slice(a, b);
+      if (/\b(AND|SELECT)\b/i.test(arm) || (arm.match(/=/g) ?? []).length !== 1) continue;
+      const sides = arm.split('=');
+      for (const [n, side] of sides.entries()) {
+        const k = KEY.exec(side);
+        if (!k) continue;
+        // A lookup compares the key with a parameter or another row's column, not a constant.
+        if (!/[@:$]\w|[A-Za-z_]\w*\s*\.\s*\w|json_extract|\bid\b/i.test(sides[1 - n] ?? '')) break;
+        const alias = (k[1] ?? k[2] ?? '').toLowerCase();
+        const off = a + arm.indexOf(side);
+        const text = normaliseExpr(sql.slice(off, off + side.length).trim().replace(/^\(+/, ''));
+        keys.set(alias, new Set([...(keys.get(alias) ?? []), text]));
+        break;
+      }
+    }
+    const best = [...keys.values()].find(k => k.size >= 2);
+    if (!best) continue;
+    // Per row: the nearest clause keyword is ON, or the OR is inside a (SELECT …) that is not a CTE body.
+    const before = masked.slice(0, m.index);
+    const clause = [...before.matchAll(/\b(WHERE|ON)\b/gi)].pop()?.[1]?.toUpperCase();
+    const stack = [];
+    for (let i = 0; i < m.index; i++) {
+      if (masked[i] === '(') stack.push(/^\s*SELECT\b/i.test(masked.slice(i + 1, i + 40)) && !/\bAS\s*$/i.test(masked.slice(Math.max(0, i - 6), i)));
+      else if (masked[i] === ')') stack.pop();
+    }
+    out.push({keys: [...best], perRow: clause === 'ON' || stack.some(Boolean)});
+  }
+  return out;
+}
+
+// ORDER BY terms that read a JSON field, as normalised expressions.
+export function orderByTerms(sql) {
+  const masked = maskSql(sql);
+  const terms = [];
+  for (const m of masked.matchAll(/\bORDER\s+BY\b/gi)) {
+    let i = m.index + m[0].length, depth = 0, from = i;
+    for (; i <= masked.length; i++) {
+      const ch = masked[i];
+      if (ch === '(') depth++;
+      else if (ch === ')') { if (depth === 0) break; depth--; }
+      const stop = i === masked.length || (depth === 0 && /^(LIMIT|OFFSET|UNION)\b/i.test(masked.slice(i, i + 6)));
+      if (stop || (depth === 0 && ch === ',')) {
+        const term = sql.slice(from, i).replace(/\s+(ASC|DESC)\b.*$/is, '').replace(/\s+COLLATE\s+\w+/i, '').trim();
+        if (/json_extract/i.test(term)) terms.push(normaliseExpr(term));
+        from = i + 1;
+        if (stop) break;
+      }
+    }
+  }
+  return terms;
+}
+
 const MB = 1024 * 1024;
 const size = st => `${st.rows} rows, ${(st.bytes / MB).toFixed(1)} MB`;
 
@@ -201,6 +295,19 @@ export const RULES = {
   'component-list-for-data': {priority: 'low', section: 'C', fix: 'Use jig.list, which virtualises, for a datasource list that can exceed about ten rows (CO-02).'},
   'list-dynamic-height': {priority: 'low', section: 'C', fix: 'Use fixed-height items; hasDynamicHeight measures every item (CO-03).'},
   'rewrite-query-on': {priority: 'low', section: 'B', fix: "Write json_extract in full and set rewriteQuery: false (DS-03); small gain, do it after index and list fixes."},
+  'or-across-keys': {priority: 'high', section: 'B', fix: 'Split the OR into one UNION branch per key, each with a matching index; adding indexes alone does not help while the OR stays.'},
+  'order-by-unindexed': {priority: 'low', section: 'B', fix: 'If the list can grow, ship an expression index on exactly this sort expression.'},
+  'watched-table-unread': {priority: 'medium', section: 'E', fix: 'Remove the table from entities:; the datasource re-runs on every change to it.'},
+  'datasource-no-id': {priority: 'low', section: 'C', fix: "Select a unique id column; without one the runtime hashes every row ('Missing ID … using hash function')."},
+  'heavy-focus': {priority: 'medium', section: 'E', fix: 'Sync on sign-in, on a schedule or on pull-to-refresh; if it must run on focus, gate it with when: (e.g. only when data is older than N minutes).'},
+  'table-change-unguarded': {priority: 'medium', section: 'F', fix: 'Add a cheap when: guard (a state flag, not a datasource count) so the handler does nothing outside the moment it is needed.'},
+  'table-change-hot-guard': {priority: 'medium', section: 'F', fix: 'Gate on a cheap flag first (e.g. sync in progress), and move datasource counts after it; this guard runs on every status write during sync.'},
+  'double-scheduled-action': {priority: 'medium', section: 'F', fix: 'Start the action from one place only (the trigger or the direct call), and make its guard reject a run already in progress.'},
+  'sequential-sync-steps': {priority: 'medium', section: 'F', fix: 'Group the calls by which local tables they read and run each group in parallel waves (jigx sync-orchestration.md); keep sequential only steps that need an earlier step or log out.'},
+  'file-transfer-sequential': {priority: 'medium', section: 'F', fix: "Set processingType: parallel (or async) so one file does not block every command queued behind it."},
+  'heavy-expression': {priority: 'medium', section: 'D', fix: 'Filter once: bind the datasource rows to a variable ($rows := …) or move the counts into the SQL, then reuse the result.'},
+  'solution-state-in-global-datasource': {priority: 'medium', section: 'D', fix: 'Pass the value from the screen instead; a global datasource re-runs for everyone whenever solution state changes (ST-02).'},
+  'solution-state-in-handler': {priority: 'low', section: 'D', fix: 'Each write re-evaluates every expression that reads solution state; write only when the value changes, or keep it in jig state (ST-01).'},
   'index-not-idempotent': {priority: 'medium', section: 'B', fix: 'Use CREATE INDEX IF NOT EXISTS.'},
   'datasource-not-equals': {priority: 'low', section: 'D', fix: "Use $count(ds[field='X']) = 0 so the no-row case passes."},
   'unused-datasource': {priority: 'medium', section: 'E', fix: 'Delete it, or move it into the one screen that needs it. A global datasource re-runs whenever its tables change.'},
@@ -230,7 +337,7 @@ export function checkPerformance(app, {stats = null, sources = {}} = {}) {
     severity, priority: priority ?? RULES[code].priority, section: RULES[code].section, code, path,
     where: where(path, sources), message, fix: RULES[code].fix});
 
-  const datasources = [], ddlActions = [], indexes = [], syncs = [];
+  const datasources = [], ddlActions = [], indexes = [], syncs = [], calls = {}, listSources = new Set();
   const refs = new Map(), readTables = new Set();
   let sqlText = '';
   walk(app, (node, path) => {
@@ -247,6 +354,20 @@ export function checkPerformance(app, {stats = null, sources = {}} = {}) {
     }
     if (node.type === 'datasource.sqlite' && typeof node.options?.query === 'string') datasources.push({path, node});
     if (node.type === 'jig.list' || node.type === 'component.list') checkList(node, path);
+    if (node.type === 'action.execute-action' && typeof node.options?.action === 'string') {
+      const from = path.startsWith('$.onTableChanged.') ? 'handler' : 'direct';
+      (calls[node.options.action] ??= {handler: [], direct: []})[from].push(path);
+    }
+    if (/^action\.execute-entit(y|ies)$/.test(node.type) && /download|upload/i.test(node.options?.method ?? '') && !node.options?.processingType)
+      add('file-transfer-sequential', path, `A file ${node.options.method} runs with the default sync processing, so it blocks the commands queued behind it.`);
+    if (node.type === 'action.action-list' && node.options?.isSequential) {
+      const n = asArray(node.options.actions).filter(a => a?.type === 'action.sync-entities').length;
+      if (n >= 4) add('sequential-sync-steps', path, `${n} sync calls run one after another; network waits add up.`);
+    }
+    if (node.type === 'action.set-state' && /^=?\s*@ctx\.solution\.state\./.test(String(node.options?.state ?? '')) && path.startsWith('$.onTableChanged.'))
+      add('solution-state-in-handler', path, `A table-change handler writes ${String(node.options.state).replace(/^=\s*/, '')}.`);
+    if (/^\$\.datasources\.[^.]+$/.test(path) && /@ctx\.solution\.state\./.test(JSON.stringify(node.options?.queryParameters ?? node.options?.parameters ?? {})))
+      add('solution-state-in-global-datasource', path, 'A global datasource takes solution state as a query parameter.');
     if (node.type === 'action.execute-sql') {
       ddlActions.push({path, node});
       sqlText += '\n' + asArray(node.options?.statements ?? node.statements).map(statementText).join('\n');
@@ -274,6 +395,8 @@ export function checkPerformance(app, {stats = null, sources = {}} = {}) {
         add('datasource-not-equals', `${path}.${key}`, "Comparison against an undefined field is false, so `ds.field != 'X'` blocks the no-row case.");
       if (mapBodies(expr).some(body => /@ctx\.datasources\.[\w-]+\s*\[/.test(body)))
         add('filter-inside-map', `${path}.${key}`, 'A datasource filter inside $map walks the view once per element (O(n²)).');
+      const filters = (expr.match(/@ctx\.datasources\.[\w-]+\s*\[|\$filter\(\s*@ctx\.datasources/g) ?? []).length;
+      if (filters >= 10) add('heavy-expression', `${path}.${key}`, `One expression filters datasources ${filters} times each time it is evaluated.`);
     }
   });
 
@@ -293,6 +416,7 @@ export function checkPerformance(app, {stats = null, sources = {}} = {}) {
     const owner = /^\$\.(jigs|components)\.([^.]+)/.exec(path);
     const ds = (owner && app[owner[1]]?.[owner[2]]?.datasources?.[name]) ?? app.datasources?.[name];
     if (ds?.type !== 'datasource.sqlite' || typeof ds.options?.query !== 'string') return;
+    listSources.add(ds);
     if (!inJig) add('component-list-for-data', path, `component.list renders every row of ${name} at once.`);
     const cols = outerColumns(ds.options.query);
     if (cols && !cols.some(c => c.toLowerCase() === 'id'))
@@ -346,6 +470,83 @@ export function checkPerformance(app, {stats = null, sources = {}} = {}) {
       if (!indexed.has(p.norm)) add('unindexed-predicate', `${path}.options.query`, `No shipped CREATE INDEX matches ${p.expr}${rows ? ` (${rows} rows)` : ''}.`, sized);
     }
   }
+
+  for (const {path, node} of datasources) {
+    const query = node.options.query;
+    const rows = Math.max(0, ...asArray(node.options.entities).map(e => stats?.[tableName(typeof e === 'string' ? e : e?.entity)]?.rows ?? 0));
+    for (const o of orAcrossKeys(query)) {
+      // With an index on every arm SQLite can use one index per arm; any unindexed arm makes it scan.
+      const missing = o.keys.filter(k => !/^(\w+\.)?id$/i.test(k) && !indexed.has(k));
+      if (missing.length) add('or-across-keys', `${path}.options.query`,
+        `OR across ${o.keys.join(', ')}${o.perRow ? ', evaluated per row (JOIN ON or a correlated subquery)' : ''}; no index on ${missing.join(', ')}, so SQLite scans.`,
+        {priority: o.perRow || rows >= 1000 ? 'high' : 'medium'});
+    }
+    for (const t of new Set(orderByTerms(query)))
+      if (!indexed.has(t)) add('order-by-unindexed', `${path}.options.query`, `ORDER BY ${t} has no matching index${rows ? ` (${rows} rows)` : ''}.`, rows >= 1000 ? {priority: 'medium'} : {});
+    const sqlLower = maskSql(query).toLowerCase().replace(/\s+/g, ' ');
+    const text = query.toLowerCase();
+    const watched = asArray(node.options.entities).map(e => typeof e === 'string' ? e : e?.entity).filter(e => e && !String(e).startsWith('='));
+    const unread = watched.filter(e => !new RegExp(`(^|[^\\w-])(default/)?${escapeRe(tableName(e))}([^\\w-]|$)`).test(text));
+    // A query that reads none of its entities uses a placeholder (e.g. dummy) that never changes.
+    if (unread.length < watched.length)
+      for (const entity of unread) add('watched-table-unread', `${path}.options.entities`, `Watches ${entity}, which the query does not read.`);
+    // Lists have their own rule; skip single-row and aggregate reads, which need no key.
+    const cols = outerColumns(query);
+    const single = /\bLIMIT\s+1\b\s*;?\s*$/i.test(sqlLower.trim()) || (cols && cols.length && /^\s*select\s+(count|sum|max|min|avg|total|group_concat|json_group_array|json_group_object)\s*\(/i.test(sqlLower.replace(/^.*?\)\s*select/s, 'select')));
+    if (cols && !cols.some(c => c.toLowerCase() === 'id') && !single && !listSources.has(node))
+      add('datasource-no-id', path, 'The datasource does not select an id column.');
+  }
+
+  // Table-change handlers run on every write to their table; system tables change all through a sync.
+  const HOT = new Set(['_syncstatus', '_syncscope', '_commandqueue', '_filestatus']);
+  asArray(app.onTableChanged).forEach((h, i) => {
+    const table = String(h?.table ?? asArray(h?.tables)[0] ?? '');
+    const guard = h?.when ?? h?.action?.when;
+    const p = `$.onTableChanged.${i}`;
+    if (guard === undefined) add('table-change-unguarded', p, `Every change to ${table} runs this handler's ${h?.action?.options?.actions?.length ?? 1} step(s) with no when: guard.`,
+      {priority: HOT.has(table.toLowerCase()) ? 'high' : 'medium'});
+    else if (HOT.has(table.toLowerCase()) && /@ctx\.datasources\./.test(String(guard)))
+      add('table-change-hot-guard', p, `The guard on ${table} reads datasources, and runs on every status write during sync.`);
+  });
+  // An action started by a handler on table T, and also directly by an action that writes T: one write
+  // fires both (acumatica#444 scheduled every PDF download twice this way).
+  const writes = (node, t) => {
+    let hit = false;
+    walk(node, v => {
+      if (hit || !v || typeof v !== 'object') return;
+      if (/^action\.(sync-entities|execute-sql|execute-entit(y|ies))$/.test(v.type ?? ''))
+        hit = [...asArray(v.options?.entities), v.options?.entity].some(e => e && tableName(typeof e === 'string' ? e : e.entity ?? '') === t);
+    });
+    return hit;
+  };
+  asArray(app.onTableChanged).forEach((h, i) => {
+    const t = tableName(String(h?.table ?? asArray(h?.tables)[0] ?? ''));
+    for (const [id, c] of Object.entries(calls)) {
+      if (!c.handler.some(p => p.startsWith(`$.onTableChanged.${i}.`)) || !app.actions?.[id]) continue;
+      const callers = [...new Set(c.direct.map(p => /^\$\.actions\.([^.]+)/.exec(p)?.[1]).filter(a => a && a !== id && app.actions[a] && writes(app.actions[a], t)))];
+      if (callers.length) add('double-scheduled-action', `$.actions.${id}`,
+        `${id} is started by the ${h.table} table-change handler and directly by ${callers.join(', ')}, which writes ${h.table}; one write runs it twice.`);
+    }
+  });
+
+  // onFocus runs every time the screen is shown.
+  const syncs_ = (node, depth = 0, seen = new Set()) => {
+    let found = false;
+    walk(node, v => {
+      if (found || !v || typeof v !== 'object') return false;
+      if (v.when !== undefined && v !== node) return false; // a guarded branch is fine
+      if (v.type === 'action.sync-entities') { found = true; return false; }
+      const target = v.type === 'action.execute-action' && v.options?.action;
+      if (typeof target === 'string' && depth < 3 && !seen.has(target) && app.actions?.[target]) {
+        seen.add(target);
+        if (syncs_(app.actions[target].action ?? app.actions[target], depth + 1, seen)) found = true;
+      }
+    });
+    return found;
+  };
+  for (const [name, jig] of Object.entries(app.jigs ?? {}))
+    if (jig?.onFocus && jig.onFocus.when === undefined && syncs_(jig.onFocus))
+      add('heavy-focus', `$.jigs.${name}.onFocus`, 'Opening the screen runs a sync every time, with no when: guard.');
 
   // Unnecessary loads: global datasources nothing reads.
   for (const name of Object.keys(app.datasources ?? {})) {
