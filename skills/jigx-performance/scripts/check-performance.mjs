@@ -119,6 +119,27 @@ export function filterPredicates(query) {
 }
 
 // The function argument of each $map(array, function) call; the array argument runs once.
+// JSONata built-ins that throw on null or on a value of the wrong type, while a missing value is
+// safe (they return undefined). Verified with jsonata 1.8.9: $trim(null) T0410, $number("") D3030,
+// $toMillis("2026-11-04 10:00:00") D3110 (SQLite's datetime() is not ISO 8601).
+const STRICT = /\$(trim|length|uppercase|lowercase|substring|substringBefore|substringAfter|contains|split|replace|pad|number|toMillis|fromMillis|formatNumber|formatInteger|round|abs|floor|ceil|sum|join)\s*\(\s*(@ctx\.(?:components\.[\w-]+\.state\.value|datasources\.[\w-]+\.[\w-]+|current\.item\.[\w-]+))\s*(?=[,)])/g;
+export function riskyCalls(expr) {
+  const e = withoutJsonataStrings(expr);
+  const out = [];
+  for (const m of e.matchAll(STRICT)) {
+    const [, fn, ref] = m;
+    const esc = escapeRe(ref);
+    // A component value can be a number or object, so only a type check guards it; a NULL
+    // column is guarded by any condition on it (null is falsy).
+    const typed = new RegExp(`\\$type\\(\\s*${esc}\\s*\\)`).test(e);
+    // $exists(null) is true, so $exists is not a guard.
+    const tested = new RegExp(`${esc}\\s*(\\?|\\band\\b|\\bor\\b|!=|=|>|<)`).test(e.replace(m[0], ''));
+    if (typed || (!ref.includes('.components.') && tested)) continue;
+    out.push({fn, ref});
+  }
+  return out;
+}
+
 function mapBodies(expr) {
   const out = [];
   for (const m of expr.matchAll(/\$map\s*\(/g)) {
@@ -179,6 +200,23 @@ export function shorthandPaths(sql) {
     if (open < 0 || !/\bjson_\w+\s*$/i.test(before.slice(0, open))) found.push(m[0]);
   }
   return found;
+}
+
+// The expression behind a select-list alias (`… AS name`), or the column itself.
+export function columnExpr(sql, name) {
+  const masked = maskSql(sql);
+  const m = new RegExp(`\\bAS\\s+["\\[\`]?${escapeRe(name)}["\\]\`]?(?=\\s*(,|FROM\\b|$))`, 'i').exec(masked);
+  if (!m) return null;
+  let i = m.index, depth = 0;
+  while (i > 0) {
+    const ch = masked[i - 1];
+    if (ch === ')') depth++;
+    else if (ch === '(') { if (depth === 0) break; depth--; }
+    else if (depth === 0 && ch === ',') break;
+    else if (depth === 0 && /\bSELECT\s*$/i.test(masked.slice(Math.max(0, i - 7), i))) break;
+    i--;
+  }
+  return sql.slice(i, m.index).trim().replace(/^DISTINCT\s+/i, '');
 }
 
 // Equality arms of one OR group that test different keys of the same table, e.g.
@@ -308,6 +346,10 @@ export const RULES = {
   'heavy-expression': {priority: 'medium', section: 'D', fix: 'Filter once: bind the datasource rows to a variable ($rows := …) or move the counts into the SQL, then reuse the result.'},
   'solution-state-in-global-datasource': {priority: 'medium', section: 'D', fix: 'Pass the value from the screen instead; a global datasource re-runs for everyone whenever solution state changes (ST-02).'},
   'solution-state-in-handler': {priority: 'low', section: 'D', fix: 'Each write re-evaluates every expression that reads solution state; write only when the value changes, or keep it in jig state (ST-01).'},
+  'expression-may-throw': {priority: 'medium', section: 'D', fix: "Guard the value (tested guards in jigx jsonata-validation-formatting.md): `x ? $trim($string(x)) : ''` for a component value, COALESCE the column in the SQL, ISO 8601 dates from SQL (or a matching picture) before $toMillis, and a $type check before $match and $number. $exists does not guard null."},
+  'script-console-log': {priority: 'medium', section: 'H', fix: 'Remove console.log from expression functions; each call writes to the device log.'},
+  'simple-script-function': {priority: 'low', section: 'D', fix: 'Write it as a JSONata expression (built-ins like $formatNumber, $substringBefore, $boolean, object lookups); keep JavaScript for logic JSONata cannot express clearly.'},
+  'unused-script-function': {priority: 'low', section: 'E', fix: 'Delete it; the script ships and loads with the solution.'},
   'index-not-idempotent': {priority: 'medium', section: 'B', fix: 'Use CREATE INDEX IF NOT EXISTS.'},
   'datasource-not-equals': {priority: 'low', section: 'D', fix: "Use $count(ds[field='X']) = 0 so the no-row case passes."},
   'unused-datasource': {priority: 'medium', section: 'E', fix: 'Delete it, or move it into the one screen that needs it. A global datasource re-runs whenever its tables change.'},
@@ -320,9 +362,15 @@ export const PRIORITIES = ['high', 'medium', 'low'];
 const DELTA = /modif|lastmod|last_mod|since|delta|changed|updated/i;
 const FILTERED = /filter|where|query|\$top/i;
 
+const throwMessage = ({fn, ref}) =>
+  fn === 'number' ? `$number(${ref}) throws on null, "" and text like "12,5" (D3030).`
+  : /^(toMillis|fromMillis)$/.test(fn) ? `$${fn}(${ref}) throws on null, "" and SQLite's "2026-11-04 10:00:00" (D3110).`
+  : `$${fn}(${ref}) throws when the value is null or not the expected type (T0410).`;
+
 // Readable location: the source file (YAML folder) or the solution section, then the path inside it.
 const KINDS = ['jigs', 'datasources', 'actions', 'functions', 'components', 'databases'];
 export function where(path, sources = {}) {
+  if (sources[path]) return sources[path];
   const m = /^\$\.([\w-]+)\.([^.]+)(.*)$/.exec(path);
   if (!m || !KINDS.includes(m[1])) return `index › ${path.replace(/^\$\.?/, '')}`;
   const file = sources[`$.${m[1]}.${m[2]}`] ?? `${m[1]}/${m[2]}`;
@@ -332,12 +380,13 @@ export function where(path, sources = {}) {
 
 // stats: optional {table: {rows, bytes}} from a device database (tableStats), to size sync findings.
 export function checkPerformance(app, {stats = null, sources = {}} = {}) {
+  sources = {...sources}; // script functions add their own locations
   const findings = [];
   const add = (code, path, message, {severity = 'warning', priority} = {}) => findings.push({
     severity, priority: priority ?? RULES[code].priority, section: RULES[code].section, code, path,
     where: where(path, sources), message, fix: RULES[code].fix});
 
-  const datasources = [], ddlActions = [], indexes = [], syncs = [], calls = {}, listSources = new Set();
+  const datasources = [], ddlActions = [], indexes = [], syncs = [], calls = {}, listSources = new Set(), listItems = new Map();
   const refs = new Map(), readTables = new Set();
   let sqlText = '';
   walk(app, (node, path) => {
@@ -395,10 +444,33 @@ export function checkPerformance(app, {stats = null, sources = {}} = {}) {
         add('datasource-not-equals', `${path}.${key}`, "Comparison against an undefined field is false, so `ds.field != 'X'` blocks the no-row case.");
       if (mapBodies(expr).some(body => /@ctx\.datasources\.[\w-]+\s*\[/.test(body)))
         add('filter-inside-map', `${path}.${key}`, 'A datasource filter inside $map walks the view once per element (O(n²)).');
+      for (const r of new Map(riskyCalls(value).map(r => [r.fn + r.ref, r])).values()) {
+        const grade = throwRisk(r, path);
+        if (grade) add('expression-may-throw', `${path}.${key}`, throwMessage(r), {priority: grade});
+      }
       const filters = (expr.match(/@ctx\.datasources\.[\w-]+\s*\[|\$filter\(\s*@ctx\.datasources/g) ?? []).length;
       if (filters >= 10) add('heavy-expression', `${path}.${key}`, `One expression filters datasources ${filters} times each time it is evaluated.`);
     }
   });
+
+  // How likely a strict call is to throw: a component value can be any type (the errors seen in
+  // device logs), a list row's column can be NULL for some rows. A column the query COALESCEs is
+  // never NULL.
+  function throwRisk({fn, ref}, at) {
+    // A component holds what the user typed or picked; a SQLite datetime is not ISO 8601.
+    if (ref.includes('.components.') || /^(toMillis|fromMillis)$/.test(fn)) return 'medium';
+    const col = ref.split('.').pop();
+    if (/^id$/i.test(col)) return null;
+    let ds;
+    if (ref.startsWith('@ctx.current.item.')) ds = [...listItems].filter(([p]) => at.startsWith(p)).pop()?.[1];
+    else {
+      const name = ref.split('.')[2];
+      const owner = /^\$\.(jigs|components)\.([^.]+)/.exec(at);
+      ds = (owner && app[owner[1]]?.[owner[2]]?.datasources?.[name]) ?? app.datasources?.[name];
+    }
+    if (ds?.type === 'datasource.sqlite' && typeof ds.options?.query === 'string' && /^\s*(\w+\s*\(\s*)*(COALESCE|IFNULL)\s*\(/i.test(columnExpr(ds.options.query, col) ?? '')) return null;
+    return ref.startsWith('@ctx.current.item.') ? 'medium' : 'low';
+  }
 
   function checkList(node, path) {
     const inJig = node.type === 'jig.list';
@@ -417,6 +489,7 @@ export function checkPerformance(app, {stats = null, sources = {}} = {}) {
     const ds = (owner && app[owner[1]]?.[owner[2]]?.datasources?.[name]) ?? app.datasources?.[name];
     if (ds?.type !== 'datasource.sqlite' || typeof ds.options?.query !== 'string') return;
     listSources.add(ds);
+    listItems.set(`${path}${inJig ? '' : '.options'}.item`, ds);
     if (!inJig) add('component-list-for-data', path, `component.list renders every row of ${name} at once.`);
     const cols = outerColumns(ds.options.query);
     if (cols && !cols.some(c => c.toLowerCase() === 'id'))
@@ -548,6 +621,31 @@ export function checkPerformance(app, {stats = null, sources = {}} = {}) {
     if (jig?.onFocus && jig.onFocus.when === undefined && syncs_(jig.onFocus))
       add('heavy-focus', `$.jigs.${name}.onFocus`, 'Opening the screen runs a sync every time, with no when: guard.');
 
+  // Expression scripts: JSONata for simple logic, JavaScript for what JSONata cannot express clearly.
+  const allText = JSON.stringify({...app, scripts: undefined});
+  const scriptRoot = Object.values(sources).some(v => String(v).startsWith('src/')) ? 'src/scripts' : 'scripts';
+  const scriptText = Object.values(app.scripts ?? {}).flatMap(g => Object.values(g ?? {})).filter(t => typeof t === 'string').join('\n');
+  for (const [group, files] of Object.entries(app.scripts ?? {})) for (const [file, text] of Object.entries(files ?? {})) {
+    if (typeof text !== 'string') continue;
+    const mod = file.replace(/\.js$/, '');
+    for (const f of scriptFunctions(text)) {
+      const call = new RegExp(`\\$${escapeRe(mod)}\\.${f.name}\\s*\\(`);
+      const calledFromApp = call.test(allText);
+      const p = `$.scripts.${group}.${mod}.${f.name}`;
+      sources[p] ??= `${scriptRoot}/${group}/${file} › ${f.name}`;
+      if (!calledFromApp && !new RegExp(`\\b${f.name}\\s*\\(`).test(scriptText.replace(new RegExp(`function\\s+${f.name}\\b`, 'g'), ''))) {
+        add('unused-script-function', p, `${f.name} is not called by any expression or script.`);
+        continue;
+      }
+      if (/\bconsole\.(log|info|debug)\s*\(/.test(f.body))
+        add('script-console-log', p, `${f.name} logs on every call${calledFromApp ? ' from an expression' : ''}.`, calledFromApp ? {} : {priority: 'low'});
+      // Simple: short, no loops, no error handling, no regular expressions or dates.
+      const complex = /\b(for|while|try|switch|new\s+(RegExp|Date)|Intl)\b|\.(forEach|map|reduce|filter|find|some|every|sort)\s*\(|\/[^/\n]+\/[gimsuy]*\.(test|exec)|\.match\s*\(/.test(f.body);
+      if (calledFromApp && f.lines <= 15 && !complex)
+        add('simple-script-function', p, `${f.name} (${f.lines} lines) is simple enough to write in JSONata.`);
+    }
+  }
+
   // Unnecessary loads: global datasources nothing reads.
   for (const name of Object.keys(app.datasources ?? {})) {
     const own = `$.datasources.${name}`;
@@ -623,7 +721,31 @@ export function loadSolution(dir) {
       sources[`$.${kind}.${name}`] = rel;
     }
   }
+  // Expression scripts (scripts/<group>/<file>.js), shaped like an SDK build's `scripts`.
+  const scriptsDir = path.join(dir, 'scripts');
+  if (fs.existsSync(scriptsDir)) for (const group of fs.readdirSync(scriptsDir, {withFileTypes: true})) {
+    if (!group.isDirectory()) continue;
+    for (const f of fs.readdirSync(path.join(scriptsDir, group.name)).filter(f => f.endsWith('.js')))
+      ((app.scripts ??= {})[group.name] ??= {})[f] = fs.readFileSync(path.join(scriptsDir, group.name, f), 'utf8');
+  }
   return {app, sources, parseErrors};
+}
+
+// Exported functions of an expression script: name, body text and line count.
+export function scriptFunctions(text) {
+  const out = [];
+  for (const m of text.matchAll(/^\s*(?:export\s+)?(?:async\s+)?function\s+(\w+)\s*\([^)]*\)\s*\{|^\s*exports\.(\w+)\s*=\s*(?:async\s+)?function\s*\w*\s*\([^)]*\)\s*\{/gm)) {
+    const name = m[1] ?? m[2];
+    if (!/^\s*(export|exports)/.test(m[0])) continue; // helpers are not callable from expressions
+    let depth = 0, i = m.index + m[0].length - 1;
+    for (; i < text.length; i++) {
+      if (text[i] === '{') depth++;
+      else if (text[i] === '}' && --depth === 0) break;
+    }
+    const body = text.slice(m.index + m[0].length, i);
+    out.push({name, body, lines: body.split('\n').filter(l => l.trim() && !/^\s*\/\//.test(l)).length});
+  }
+  return out;
 }
 
 // For an SDK build, map each jig, datasource, action and function to the TypeScript file that

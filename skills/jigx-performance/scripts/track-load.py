@@ -108,8 +108,15 @@ def read_logs(path, after_id, since_ms):
                     m = json.loads(message)
                 except ValueError:
                     continue
-                rows.append({"at": iso(ts), "level": m.get("level"), "category": m.get("category"),
-                             "message": redact(str(m.get("message", "")))[:300]})
+                row = {"at": iso(ts), "level": m.get("level"), "category": m.get("category"),
+                       "message": redact(str(m.get("message", "")))[:300]}
+                if m.get("category") == "solution.expression":
+                    # Keep the failing expression (solution code) and its screen; never the evaluated data.
+                    ctx = next((p for p in m.get("additionalParameters") or [] if isinstance(p, dict) and "expression" in p), {})
+                    screen = ctx.get("screen")
+                    row["expression"] = redact(str(ctx.get("expression", "")))[:300]
+                    row["screen"] = screen.get("screenId") if isinstance(screen, dict) else None
+                rows.append(row)
     except sqlite3.Error:
         pass
     return rows, last
@@ -194,6 +201,18 @@ def waterfall(entries, width=40):
     return lines
 
 
+def expression_errors(logs):
+    """Expression failures grouped by expression and error, most frequent first."""
+    groups = {}
+    for r in logs:
+        if r.get("category") != "solution.expression":
+            continue
+        key = (r.get("expression") or "?", r["message"].replace("Failed with error: ", ""), r.get("screen"))
+        groups[key] = groups.get(key, 0) + 1
+    return [{"expression": e, "error": err, "screen": sc, "count": n}
+            for (e, err, sc), n in sorted(groups.items(), key=lambda kv: -kv[1])]
+
+
 def summarise(label, db, samples, result, armed, ready_at, logs, final, scopes):
     run = tracked(final, scopes, armed) if final else {}
     starts = [v["startedAt"] for v in run.values() if v and v["startedAt"]]
@@ -225,6 +244,7 @@ def summarise(label, db, samples, result, armed, ready_at, logs, final, scopes):
         "snapshot_timeouts": snapshot,
         "log_errors": sum(1 for r in logs if r["level"] == "ERROR"),
         "hash_fallbacks": hashed,
+        "expression_errors": expression_errors(logs),
         "log_warnings": sum(1 for r in logs if r["level"] == "WARNING"),
         "sample_interval_note": "Entry times have the resolution of the sampling interval; scope durations use the runtime's own timestamps.",
     }
@@ -285,6 +305,8 @@ def track(db, label, out, tables=(), scopes=(), interval=0.25, settle=5.0, timeo
         print(f"Timeout for first snapshot: {summary['snapshot_timeouts']}", file=stream)
     if summary.get("hash_fallbacks"):
         print(f"Rows hashed for lack of an id: {summary['hash_fallbacks']}", file=stream)
+    for e in summary.get("expression_errors", [])[:10]:
+        print(f"Expression error x{e['count']}{' on ' + e['screen'] if e['screen'] else ''}: {e['error']}: {e['expression']}", file=stream)
     print(f"Saved {os.path.join(out, label + '-summary.json')}", file=stream, flush=True)
     return summary
 

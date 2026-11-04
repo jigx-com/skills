@@ -102,7 +102,9 @@ def timing_lines(comparison):
                  f"{comparison['snapshot_timeouts']['after']}. Runtime log errors: "
                  f"{comparison['log_errors']['before']} → {comparison['log_errors']['after']}."
                  + (f" Rows hashed for lack of an id: {comparison['hash_fallbacks']['before']} → {comparison['hash_fallbacks']['after']}."
-                    if "hash_fallbacks" in comparison else ""))
+                    if "hash_fallbacks" in comparison else "")
+                 + (f" Expression errors: {comparison['expression_errors']['before']} → {comparison['expression_errors']['after']}."
+                    if "expression_errors" in comparison else ""))
     for w in comparison.get("warnings", []):
         lines.append(f"- Warning: {w}")
     return lines

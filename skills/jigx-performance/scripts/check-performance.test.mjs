@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {spawnSync} from 'node:child_process';
-import {checkPerformance, filterPredicates, parseCreateIndex, normaliseExpr, loadSolution, markdownReport, newFindings, orAcrossKeys, orderByTerms, outerColumns, sdkSources, shorthandPaths, where} from './check-performance.mjs';
+import {checkPerformance, filterPredicates, parseCreateIndex, normaliseExpr, loadSolution, markdownReport, newFindings, orAcrossKeys, orderByTerms, outerColumns, riskyCalls, scriptFunctions, sdkSources, shorthandPaths, where} from './check-performance.mjs';
 
 // Fixtures are minimal (no id, rewriteQuery on, loose entities); those checks have their own tests.
 const NOISE = new Set(['unused-datasource', 'rewrite-query-on', 'datasource-no-id', 'watched-table-unread', 'order-by-unindexed']);
@@ -317,4 +317,50 @@ test('an OR with an index on every arm and a placeholder entity are not findings
     b: ds("SELECT date('now') AS id", ['dummy']),
   }, actions: {idx}};
   assert.deepEqual(checkPerformance(app).findings.filter(f => ['or-across-keys', 'watched-table-unread'].includes(f.code)), []);
+});
+
+test('expressions that throw on null or the wrong type, graded by where the value comes from', () => {
+  // The two errors found in device logs.
+  assert.deepEqual(riskyCalls('=$trim(@ctx.components.task.state.value)'), [{fn: 'trim', ref: '@ctx.components.task.state.value'}]);
+  assert.equal(riskyCalls('=$length(@ctx.components.nbr.state.value) > 0').length, 1);
+  assert.deepEqual(riskyCalls('=$type(@ctx.components.a.state.value) = "string" ? $trim(@ctx.components.a.state.value) : ""'), []);
+  assert.deepEqual(riskyCalls('=@ctx.current.item.Date ? $toMillis(@ctx.current.item.Date) : 0'), []);
+  assert.deepEqual(riskyCalls('=$substringBefore(@ctx.current.item.data.Date.value, "T")'), [], 'a missing JSON field is undefined, which is safe');
+  const app = {
+    datasources: {
+      rows: ds("SELECT id, COALESCE(json_extract(data, '$.N'), '') AS n, json_extract(data, '$.M') AS m FROM [t]", ['t']),
+    },
+    jigs: {
+      l: {type: 'jig.list', data: '=@ctx.datasources.rows', item: {type: 'component.list-item', options: {
+        title: '=$trim(@ctx.current.item.m)', subtitle: '=$trim(@ctx.current.item.n)'}}},
+      f: {type: 'jig.default', title: '=$number(@ctx.components.amount.state.value) + $trim(@ctx.datasources.rows.m)'},
+    },
+  };
+  const got = checkPerformance(app).findings.filter(f => f.code === 'expression-may-throw').map(f => `${f.where} ${f.priority} ${f.message.split(' ')[0]}`).sort();
+  assert.deepEqual(got, [
+    'jigs/f › title low $trim(@ctx.datasources.rows.m)',
+    'jigs/f › title medium $number(@ctx.components.amount.state.value)',
+    'jigs/l › item.options.title medium $trim(@ctx.current.item.m)',
+  ]);
+});
+
+test('expression scripts: console.log, simple functions, unused functions', () => {
+  const js = `export function label(s) {
+  console.log(s)
+  return s === 'A' ? 'Active' : 'Other'
+}
+export function parse(rows) {
+  return rows.map(r => r.id).filter(Boolean)
+}
+export function unused(x) { return x }
+function helper() { return 1 }
+`;
+  assert.deepEqual(scriptFunctions(js).map(f => f.name), ['label', 'parse', 'unused']);
+  const app = {scripts: {expressions: {'util.js': js}}, jigs: {a: {type: 'jig.default', title: '=$util.label(@ctx.jig.inputs.s) & $util.parse([])'}}};
+  const got = checkPerformance(app).findings.filter(f => /script/.test(f.code)).map(f => `${f.code} ${f.where} ${f.priority}`).sort();
+  assert.deepEqual(got, [
+    'script-console-log scripts/expressions/util.js › label medium',
+    'simple-script-function scripts/expressions/util.js › label low',
+    'unused-script-function scripts/expressions/util.js › unused low',
+  ]);
 });

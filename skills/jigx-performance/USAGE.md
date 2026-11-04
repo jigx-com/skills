@@ -97,6 +97,8 @@ What it checks:
 | List components | `component.list` bound to data (use `jig.list`); `hasDynamicHeight`; any other datasource with no `id` | low |
 | Query rewriting | `rewriteQuery: false` with `'$.field'` shorthand (wrong data); `rewriteQuery` left on | high; low |
 | Expressions and state | datasource filters inside `$map`; one expression filtering datasources 10+ times; solution state as a global datasource parameter; solution state written by a table-change handler; `!=` against a datasource field | high; medium; medium; low; low |
+| Expression errors | `$trim`, `$length`, `$substring…`, `$split`, `$number`, `$toMillis` and similar on a value that can be `null` or the wrong type, with no guard: a component value, a list row's column, a SQL column the query does not `COALESCE`. These are the `T0410`/`D3030`/`D3110` errors in device logs | medium (component values, list rows, dates); low (other columns) |
+| JavaScript | expression functions short and simple enough for JSONata; `console.log` in expression functions; functions nothing calls | low; medium; low |
 
 The sync-behaviour, `OR` and expression checks come from measured fixes: parallel
 waves took an initial sync from 35 s to 14 s, splitting an `OR` lookup per key took a
@@ -117,7 +119,7 @@ took them from 117 s to 24 s.
 
 | Area | How | Note |
 | --- | --- | --- |
-| Sync | the simulator's sync tables, sampled live, three sign-ins | time to ready, each scope and step |
+| Sync | the simulator's sync tables, sampled live, three sign-ins | time to ready, each scope and step; snapshot timeouts, rows hashed for lack of an id, and every expression error with its expression and screen |
 | Queries and actions | every query, `execute-sql` step and index build run on a copy of the test user's database | host times: right for ranking and before/after, a phone is slower |
 | Screens | Maestro taps and waits for an element that appears once the data is there, three runs | includes datasources, expressions and rendering |
 | Expressions | no separate timing exists in Jigx | inside screen time; the audit finds the costly ones |

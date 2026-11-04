@@ -2,9 +2,49 @@
 
 ## JSONata
 
-Keep expressions readable. Where solution script metadata is available, move complex
-logic into a JavaScript function. Check the execution boundary in
-`runtime-verification.md` before doing this for REST configuration.
+Keep expressions readable. **Use JSONata for simple logic and JavaScript only for logic
+JSONata cannot express clearly.** Simple means a lookup, a label, a truthiness check, a
+number or date format, a trim or split: write it with built-ins (`$boolean`,
+`$formatNumber`, `$substringBefore`, an object lookup `{"A": "Active"}[$s]`), not a
+script function. Keep JavaScript for HTML generation, multi-field parsing, loops over
+records, error-document parsing and similar (`media-pdf-javascript.md`). Do not leave
+`console.log` in an expression function: it writes to the device log on every call.
+Check the execution boundary in `runtime-verification.md` before moving logic for REST
+configuration.
+
+### Values that make an expression throw
+
+A failing expression logs `solution.expression … evaluate()` as an ERROR and returns
+nothing, so the field, condition or action it drives silently breaks. Behaviour
+checked with jsonata 1.8.9:
+
+| Value | String functions (`$trim`, `$length`, `$substring*`, `$split`, `$replace`, `$contains`, `$uppercase`) | `$number` | `$toMillis` | Arithmetic and `>` `<` |
+| --- | --- | --- | --- | --- |
+| missing (undefined) | undefined, safe | undefined | undefined | undefined |
+| `null` (a NULL SQL column) | **throws T0410** | **throws** | **throws** | **throws T2001/T2010** |
+| number or object (a dropdown value) | **throws T0410** | number ok | **throws** | number ok |
+| `""` (an empty text field) | ok | **throws D3030** | **throws D3110** | **throws** |
+| `"12,5"`, `" 3 "` (typed text) | ok | **throws D3030** | | |
+| `"2026-11-04 10:00:00"` (SQLite `datetime()`) | ok | | **throws D3110** (not ISO 8601) | |
+
+Guards that work (each tested against undefined, `null`, a number, an object, `""`,
+typed text and both date formats):
+
+- a component value: `$type(v) = 'string' ? $trim(v) : ''`, or `v ? $trim($string(v)) : ''`
+  (the second turns a number into its text)
+- a SQL column: `COALESCE(json_extract(data, '$.x'), '')` in the query, or `v ? … : …`
+  (`null` is falsy). `$exists(null)` is **true**, so `$exists(v) ? $trim(v) : ''` still
+  throws on null
+- a number typed by the user: `$type(v) = 'number' ? v : ($type(v) = 'string' and
+  $match(v, /^-?\d+(\.\d+)?$/) ? $number(v) : 0)`. `$match` alone throws on `null` and
+  on numbers
+- a date for `$toMillis`: emit ISO 8601 from SQL (`strftime('%Y-%m-%dT%H:%M:%SZ', …)`),
+  or pass the picture of the stored format, `$toMillis(v, '[Y0001]-[M01]-[D01]
+  [H01]:[m01]:[s01]')` for SQLite's `datetime()`. With a picture, text in another format
+  returns undefined instead of throwing, so the picture must match the data
+
+`$string(null)` is the text `"null"`, so wrapping in `$string` alone shows "null" to the
+user.
 
 Common rules:
 

@@ -100,7 +100,9 @@ screen size, start-up, sync shape, writes, credentials. Then present:
 3. **Not proposed**: findings left alone and why (unreachable path, needs the API owner,
    needs a product decision, accepted pattern).
 
-Then stop and ask which sections or changes to apply. Do not change any file before the
+Propose a fix for **every expression error the runs logged** (`track-load.py` lists each
+with its expression and screen), not only the slow parts: a failing expression blanks
+the field or condition it drives. Then stop and ask which sections or changes to apply. Do not change any file before the
 user agrees. Approval for one section does not cover another.
 
 ## 4. Apply, publish and time again

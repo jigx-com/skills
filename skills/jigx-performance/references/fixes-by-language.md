@@ -48,6 +48,10 @@ is removed (`indexes-and-execute-sql.md`).
 | --- | --- | --- |
 | `filter-inside-map` | In `expressions:`, build a lookup once (`$merge($map(view, function($v){ {$v.id: $v} }))`) and read `$lookup[$x.id]` inside the `$map` | The same JSONata in `screen.addExpression(...)`; the expression strings are identical |
 | `datasource-not-equals` | `$count(@ctx.datasources.x[field='X']) = 0` | The same JSONata string |
+| `expression-may-throw` | Guard the value: `$type(v) = 'string' ? $trim(v) : ''` for a component, `COALESCE(…, '')` in the SQL for a column, ISO dates from SQL before `$toMillis` (tested guards: `jigx` `jsonata-validation-formatting.md`) | The same JSONata in the expression string, the same SQL in `.query(\`…\`)` |
+| `simple-script-function` | Replace the `$module.fn(...)` call with JSONata built-ins, then delete the function | The same, and remove the function from `src/scripts/…` |
+| `script-console-log` | Delete the `console.log` lines in `scripts/…/*.js` | Delete them in `src/scripts/…/*.js` |
+| `unused-script-function` | Delete the function | Delete it from `src/scripts/…` |
 | `heavy-expression` | Bind once: `=( $rows := @ctx.datasources.x; … $rows[step='a'] … )`, or count in SQL | The same JSONata in the expression string |
 | `solution-state-in-global-datasource` | Move the datasource into the jig and pass the value as a jig input | Move it to `screen.addDatasource` and pass an input |
 | `solution-state-in-handler` | Write the state only when the value changes (`when:` on the set-state), or use jig state | Same `when` on the set-state action |

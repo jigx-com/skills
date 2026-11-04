@@ -69,7 +69,11 @@ class TrackLoadTest(unittest.TestCase):
                        "message": "#3 'orders-list' Timeout for first snapshot, querying initial local results... Bearer abc.def"}
                 hashed = {"level": "WARNING", "category": "get-entity-id",
                           "message": "Performance Issue: Missing ID or value of entity (4 times) -> using hash function"}
-                for m in (msg, hashed):
+                failed = {"level": "ERROR", "category": "solution.expression",
+                          "message": 'Failed with error: Argument 1 of function "trim" does not match function signature',
+                          "additionalParameters": [{"expression": "=$trim(@ctx.components.task.state.value)",
+                                                    "evaluated": {"secret": "customer data"}, "screen": {"screenId": "add-expense"}}]}
+                for m in (msg, hashed, failed, failed):
                     log.execute("INSERT INTO _logMessages (timestamp, state, message) VALUES (?, 'read', ?)",
                                 (int(time.time() * 1000), json.dumps(m)))
                 log.commit()
@@ -88,8 +92,11 @@ class TrackLoadTest(unittest.TestCase):
         self.assertEqual(summary["solution"], "demo-test")
         self.assertEqual(summary["final_counts"], {"orders": 3})
         self.assertEqual(summary["snapshot_timeouts"], {"orders-list": 1})
-        self.assertEqual(summary["log_errors"], 0)  # the ERROR line predates arming
+        self.assertEqual(summary["log_errors"], 2)  # the old ERROR line predates arming; two expression errors
         self.assertEqual(summary["hash_fallbacks"], 4)
+        self.assertEqual(summary["expression_errors"], [{"expression": "=$trim(@ctx.components.task.state.value)",
+                                                         "error": 'Argument 1 of function "trim" does not match function signature',
+                                                         "screen": "add-expense", "count": 2}])
         self.assertGreater(summary["first_start_to_ready_s"], 0)
         a, b = summary["entries"]["sync-base/a"], summary["entries"]["sync-base/b"]
         self.assertLess(a["start_s"], b["start_s"])
@@ -99,6 +106,7 @@ class TrackLoadTest(unittest.TestCase):
         text += json.dumps(summary)
         self.assertNotIn("dXNlcjpwYXNz", text)
         self.assertNotIn("abc.def", text)
+        self.assertNotIn("customer data", text)
         self.assertIn("Timeout for first snapshot", out.getvalue())
 
     def test_failed_entry_stops_the_run(self):
