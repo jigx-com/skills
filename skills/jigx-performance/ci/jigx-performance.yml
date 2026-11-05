@@ -37,6 +37,7 @@ jobs:
           repository: jigx-com/skills
           ref: main
           path: .jigx-skills
+          sparse-checkout: skills/jigx-performance   # only this skill
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
