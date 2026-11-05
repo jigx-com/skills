@@ -11,7 +11,10 @@ project) and type:
 
 Claude:
 
-1. finds the solution (YAML or SDK; builds an SDK project if its build is stale)
+1. shows what it found and asks before doing anything: the solution, the **branch and
+   commit** checked out (with any uncommitted changes), the simulators and devices
+   running with their Jigx apps, and what timing still needs. You confirm the branch,
+   pick another, or set up a device first
 2. audits it in a few seconds and shows each confirmed problem as *what is wrong ·
    where · the fix*, by priority (full list in `perf-review/before/audit.md`)
 3. asks what next:
@@ -26,7 +29,8 @@ Claude:
 
 Shortcuts: `/jigx-performance review` goes straight to "time it and fix it";
 `/jigx-performance audit` only audits. Nothing in your solution changes until you
-approve it, and nothing is ever published to or timed against production.
+approve it, approved fixes go on a new branch (never the one you have checked out), and
+nothing is ever published to or timed against production.
 
 ## What you need
 
@@ -38,7 +42,9 @@ approve it, and nothing is ever published to or timed against production.
 | Time on Android | Android SDK platform-tools (`adb`) and an emulator or a phone with USB debugging; for sync timing a **Google APIs** emulator image (not Google Play), which allows `adb root` |
 | Publish | SDK: the `jigx_debug` MCP server. YAML: `copy-to-test.py` makes a renamed copy, then Jigx Builder in VS Code publishes it |
 
-Claude checks these before timing and tells you what is missing.
+Claude checks these before timing (`preflight.py`) and tells you what is missing. With no
+simulator or emulator running it offers to boot one and waits until the Jigx app is open
+with the test user signed in; it does not skip the timing on its own.
 
 ## Every PR: the regression check
 
@@ -151,6 +157,7 @@ YAML folder or an SDK `build/output.json`.
 | `pr-check.mjs` | the PR regression check against the target branch (CI: `ci/jigx-performance.yml`) |
 | `check-plans.py` | query plans: full scans, unused indexes, CI guards |
 | `time-queries.mjs` | every query, action and index build timed on a device database copy (`--scale 10`, `--baseline`) |
+| `preflight.py` | the first thing `/jigx-performance` shows: solution, branch and commit, devices and Jigx apps, missing tools |
 | `copy-to-test.py` | a YAML solution copied to a test solution name, with the Builder organisation settings, for publishing |
 | `time-screens.py` | screen and cold-start times through Maestro, iOS or Android (`--platform`, `--compare`) |
 | `track-load.py` / `compare-runs.py` | live sync tracking in the iOS Simulator or an Android emulator (`--android`); before/after medians |

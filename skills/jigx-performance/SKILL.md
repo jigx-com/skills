@@ -21,10 +21,15 @@ delta design and writes live in the `jigx` skill (`sync-orchestration.md`,
 **`/jigx-performance` with no argument, or "check my solution's performance"**: guide
 the user; ask as little as possible.
 
-1. **Find the solution** without asking: the current folder (or the path given) is YAML
-   when it has `index.jigx`, SDK when it has `src/app.ts`. For SDK, run `jigx build`
-   when `build/output.json` is missing or older than `src/`. Ask for the path only if
-   neither is found.
+1. **Show where you are, then ask once.** Run `scripts/preflight.py <folder>` (the
+   current folder, or the path given; read-only, a few seconds) and show its four lines:
+   the solution and type (YAML when it has `index.jigx`, SDK when it has `src/app.ts`),
+   the **branch and commit** with any uncommitted changes, the booted or connected devices
+   with their Jigx apps, and what timing is missing. Then ask one question: **review this
+   branch** (recommended), **another branch or folder**, or **set up a device first**.
+   Do nothing else before the answer: the branch checked out is often not the one the
+   user means. Ask for the path only if no solution is found. For SDK, run `jigx build`
+   when `build/output.json` is missing or older than `src/`.
 2. **Audit it** (read-only, seconds; "Audit" steps 1 and 4). Show in plain words: the
    counts by priority, then each high and medium finding you confirmed in the source,
    as "what is wrong · where · the fix", grouped by section, each section headed by its
@@ -42,12 +47,20 @@ the user; ask as little as possible.
 **`/jigx-performance review [path]`**: go straight to "Review". **`/jigx-performance
 audit [path]`**: steps 1 and 2 above, no question.
 
-Before any timing step, check what it needs and tell the user exactly what is missing
-and how to get it, in one message: a booted iOS Simulator or Android emulator with the
-Jigx app (a Google APIs image for Android sync timing), Node 22.5+, Maestro and Java
-17+ (screen times only), and for SDK projects the `jigx_debug` MCP server. Time both
-platforms when both are available, one at a time; close an emulator before starting
-another. Skip a timing area whose tool is missing rather than stopping the review.
+**Never change the branch that is checked out.** The audit and timing are read-only.
+Approved fixes go on a new branch made from it (`perf/<short-name>`) or in a copy, and
+you say which before the first change.
+
+**Timing needs a device; set it up, do not skip it.** Before any timing step, rerun
+`preflight.py`. With no device booted, say so and offer to boot one: an iOS Simulator
+(`xcrun simctl boot <udid>`, shown in DeviceHub in Xcode 27) or an Android emulator
+(`emulator -avd <name>`; a Google APIs image for sync timing), with the Jigx app and the
+test user signed in, then wait for the user to confirm. Name every other missing tool
+with its install command in one message: Node 22.5+, Maestro (`brew install
+mobile-dev-inc/tap/maestro`) and Java 17+ for screen times, and for SDK projects the
+`jigx_debug` MCP server. Only a tool the user declines to install is skipped, and the
+report says that area was not measured. Time both platforms when both are available,
+one at a time; close an emulator before starting another.
 
 Loaded from the task instead of a command: when the user writes or changes a
 `datasource.sqlite` query, an `action.execute-sql` index or a list, follow "Build";
@@ -78,7 +91,8 @@ Follow `references/customer-review.md`:
    (low), and list what is left alone and why, so nothing relevant is missed.
 5. **Stop and ask.** Recommend applying every **Needs fixing** change; the user may
    pick sections instead. Change nothing before the user agrees.
-6. Apply approved sections one commit each, rebuild and check after each, publish to the
+6. Apply approved sections one commit each on a new branch (never the checked-out one),
+   rebuild and check after each, publish to the
    same test solution and **time everything again** (`post`); compare with
    `compare-runs.py`, `time-queries.mjs --baseline` and `time-screens.py --compare`, and
    show `perf-review/report.md` with feedback: what got faster, what did not move, any
@@ -208,6 +222,9 @@ Follow `references/customer-review.md`:
   before and after, findings per section, changes applied, what was not verified.
 - `scripts/compare-runs.py` - medians and per-scope and per-entry change between
   before and after runs, with warnings for weak comparisons.
+- `scripts/preflight.py` - read-only start check: the solution and type, branch, commit
+  and uncommitted changes, booted simulators and connected Android devices with their
+  Jigx apps, and the tools timing still needs.
 - `scripts/copy-to-test.py` - a YAML solution copied under a test solution name (and
   the Builder organisation settings) for publishing with Jigx Builder; refuses the
   original's name.
