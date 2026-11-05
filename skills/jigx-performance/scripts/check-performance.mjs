@@ -230,7 +230,7 @@ export function columnExpr(sql, name) {
 export function cteJoins(sql) {
   const masked = maskSql(sql);
   const ctes = new Map();
-  const head = /(?:\bWITH|,)\s*(\w+)\s+AS\s+(?:NOT\s+)?(?:MATERIALIZED\s+)?\(/gi;
+  const head = /(?:\bWITH|,)\s*(\w+)\s+AS\s+((?:NOT\s+)?MATERIALIZED\s+)?\(/gi;
   for (const m of masked.matchAll(head)) {
     let depth = 1, i = m.index + m[0].length;
     for (; i < masked.length && depth; i++) depth += masked[i] === '(' ? 1 : masked[i] === ')' ? -1 : 0;
@@ -239,21 +239,27 @@ export function cteJoins(sql) {
     if (!from || /\b(JOIN|GROUP\s+BY|UNION|DISTINCT|LIMIT)\b|json_each|json_tree/i.test(body) || /\bSELECT\b/i.test(from[1]) || /^\s*,/.test(from[4])) continue;
     // Columns computed by an expression: the ones an expression index would have to match.
     const computed = new Set();
+    // Over another CTE, a plain column the inner CTE computes is computed too.
+    const inner = ctes.get(from[2].toLowerCase());
     let depth2 = 0, part = '';
     for (const ch of from[1] + ',') {
       if (ch === '(') depth2++; else if (ch === ')') depth2--;
       if (ch === ',' && depth2 === 0) {
         const a = /^\s*([\s\S]*?)\s+AS\s+(\w+)\s*$/i.exec(part);
+        const bare = /^\s*(?:\w+\.)?(\w+)\s*$/.exec(a ? a[1] : part);
         if (a && /\(/.test(a[1])) computed.add(a[2].toLowerCase());
+        else if (bare && inner?.computed.has(bare[1].toLowerCase())) computed.add((a ? a[2] : bare[1]).toLowerCase());
         part = '';
       } else part += ch;
     }
-    if (computed.size) ctes.set(m[1].toLowerCase(), {table: from[2].replace(/^\[|\]$/g, ''), computed});
+    // AS MATERIALIZED builds it once, and SQLite gives a built CTE an automatic index: not affected.
+    const built = m[2] && !/NOT/i.test(m[2]);
+    ctes.set(m[1].toLowerCase(), {table: inner?.table ?? from[2].replace(/^\[|\]$/g, ''), computed, built});
   }
   const out = [];
   for (const j of masked.matchAll(/\bJOIN\s+(\w+)(?:\s+AS)?\s+(\w+)\s+ON\b([\s\S]*?)(?=\b(?:LEFT|INNER|CROSS|JOIN|WHERE|GROUP|ORDER|LIMIT|UNION)\b|\)\s*(?:,|SELECT)|$)/gi)) {
     const cte = ctes.get(j[1].toLowerCase());
-    if (!cte) continue;
+    if (!cte || cte.built) continue;
     const cols = [...j[3].matchAll(new RegExp(`\\b${j[2]}\\.(\\w+)`, 'gi'))].map(c => c[1].toLowerCase()).filter(c => cte.computed.has(c));
     if (cols.length) out.push({cte: j[1], alias: j[2], table: cte.table, columns: [...new Set(cols)]});
   }
@@ -542,6 +548,10 @@ export function checkPerformance(app, {stats = null, sources = {}} = {}) {
     const entities = asArray(opts.entities ?? node.entities);
     const statements = asArray(opts.statements ?? node.statements).map(statementText);
     if (!entities.length) add('execute-sql-entities', path, 'action.execute-sql has no entities: array, so the action fails on shape before any statement runs.', {severity: 'error'});
+    // Writes that rebuild rows (INSERT … SELECT) join CTEs the same way datasources do.
+    for (const [i, sql] of statements.entries()) for (const c of cteJoins(sql))
+      add('cte-join-no-index', `${path}.options.statements.${i}`,
+        `Joins ${c.cte} on ${c.columns.map(x => `${c.alias}.${x}`).join(', ')}, columns the CTE computes from ${c.table}: no index is used, so ${c.table} is scanned for every row the statement writes.`);
     const created = statements.map(parseCreateIndex).filter(Boolean);
     if (!created.length) continue;
     indexes.push(...created.map(c => ({...c, path})));

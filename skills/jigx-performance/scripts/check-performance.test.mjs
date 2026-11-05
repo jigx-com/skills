@@ -375,6 +375,12 @@ test('a join on columns a CTE computes from one table is found; direct joins and
     LEFT JOIN agg a ON a.Nbr = o.id
     LEFT JOIN locations AS direct ON json_extract(direct.data, '$.AccountID') = 1`;
   assert.deepEqual(cteJoins(q).map(c => `${c.cte}:${c.columns.join('+')}:${c.table}`), ['cust:sid:customers', 'loc:accountid+cd:locations']);
+  // Through a chain of CTEs, and not when the joined CTE is MATERIALIZED (built once, auto-indexed).
+  const chain = `WITH src AS (SELECT trim(json_extract(h.data, '$.Nbr')) AS nbr, h.data FROM headers h),
+    offs AS (SELECT nbr, CASE WHEN 1 THEN 'a' END AS o FROM src),
+    built AS MATERIALIZED (SELECT nbr FROM src)
+    SELECT l.id FROM logs l LEFT JOIN offs o ON o.nbr = l.nbr LEFT JOIN built b ON b.nbr = l.nbr`;
+  assert.deepEqual(cteJoins(chain).map(c => `${c.cte}:${c.columns.join('+')}:${c.table}`), ['offs:nbr:headers']);
   const app = {datasources: {opps: {type: 'datasource.sqlite', options: {entities: ['opportunities'], query: q}}}};
   assert.ok(checkPerformance(app).findings.some(f => f.code === 'cte-join-no-index'));
 });
