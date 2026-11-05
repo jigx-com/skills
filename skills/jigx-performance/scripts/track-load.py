@@ -230,9 +230,14 @@ def live_line(elapsed, state, scopes, armed):
     return f"{elapsed:7.2f}s  " + " | ".join(parts or ["no scope started yet"]) + f"  queue={state['queue']}  {counts}"
 
 
+WAITING = {"not started", "pending", "queued", None}
+
+
 def entry_timings(samples, armed):
-    """First sample an entry was seen syncing (or any state) to the first sample it was synced."""
-    first_seen, started, finished, failed = {}, {}, {}, set()
+    """From the first sample an entry was seen syncing to the first sample it was synced. An
+    entry that went from waiting to synced between two samples starts at its last waiting
+    sample: its time is at most one interval, and the wait before it is not counted."""
+    first_seen, started, waited, finished, failed = {}, {}, {}, {}, set()
     for s in samples:
         t = s["t"]
         for sid, v in s["scopes"].items():
@@ -241,6 +246,8 @@ def entry_timings(samples, armed):
             for key, st in v["entries"].items():
                 name = f"{sid}/{key}"
                 first_seen.setdefault(name, t)
+                if st in WAITING and name not in finished:
+                    waited[name] = t
                 if st == "syncing":
                     started.setdefault(name, t)
                 if st == "synced" and name not in finished:
@@ -249,7 +256,7 @@ def entry_timings(samples, armed):
                     failed.add(name)
     out = {}
     for name in first_seen:
-        start = started.get(name, first_seen[name])
+        start = started.get(name, waited.get(name, first_seen[name]))
         end = finished.get(name)
         out[name] = {"start_s": round(start, 2), "end_s": round(end, 2) if end is not None else None,
                      "duration_s": round(end - start, 2) if end is not None else None,

@@ -255,6 +255,18 @@ class ReviewReportTest(unittest.TestCase):
 
 
 
+class EntryTimingTest(unittest.TestCase):
+    def test_wait_in_the_queue_is_not_counted_as_the_call(self):
+        scope = lambda e: {"sync": {"state": "syncing", "startedAt": 10, "syncedAt": None, "entries": e}}
+        samples = [{"t": 1.0, "scopes": scope({"a": "syncing", "b": "not started"})},
+                   {"t": 20.0, "scopes": scope({"a": "synced", "b": "not started"})},
+                   {"t": 20.5, "scopes": scope({"a": "synced", "b": "synced"})}]
+        e = tl.entry_timings(samples, armed=0)
+        self.assertEqual(e["sync/a"]["duration_s"], 19.0)
+        self.assertEqual(e["sync/b"]["duration_s"], 0.5)  # waited 19 s, ran for at most one interval
+        self.assertEqual(e["sync/b"]["start_s"], 20.0)
+
+
 class AndroidReadTest(unittest.TestCase):
     def test_android_hash_warning_counts(self):
         logs = [{"level": "WARNING", "category": "get-entity-id", "message": "Missing entity id, falling back to hash"},
