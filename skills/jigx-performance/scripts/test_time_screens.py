@@ -25,6 +25,22 @@ class TimeScreensTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             ts.flow("x", {"name": "bad name", "tap": "a", "ready": "b"})
 
+    def test_android_flow_matches_inside_elements_and_cold_start_times_the_launch(self):
+        screen = {"name": "list", "setup": [{"wait": "Home"}], "tap": "View Appointments", "ready": r"\d{6}-\d+",
+                  "after": {"android": [{"back": True}], "ios": [{"tap": "Back"}]}}
+        android = ts.flow("com.jigx.app", screen, "android").splitlines()
+        self.assertIn('    visible: "[\\\\s\\\\S]*(?:\\\\d{6}-\\\\d+)[\\\\s\\\\S]*"', android)
+        self.assertIn('- tapOn: "View Appointments"', android)  # taps stay exact
+        self.assertEqual(android[-1], "- back")
+        ios = ts.flow("com.jigx.app", screen, "ios").splitlines()
+        self.assertIn('    visible: "\\\\d{6}-\\\\d+"', ios)
+        self.assertEqual(ios[-1], '- tapOn: "Back"')
+        cold = ts.flow("com.jigx.app", {"name": "start", "start": "cold", "ready": {"gone": "Preparing"}}).splitlines()
+        self.assertEqual(cold[2], "- stopApp")
+        start = cold.index("- evalScript: ${output.t0 = Date.now()}")
+        self.assertEqual(cold[start + 1:start + 4], ["- launchApp:", "    stopApp: false", "- extendedWaitUntil:"])
+        self.assertEqual(cold[start + 4], '    notVisible: "Preparing"')
+
     def test_parses_the_logged_time(self):
         log = "Orchestra: JsConsole: JIGX_SCREEN detail ms=2121\nRun ${console.log('JIGX_SCREEN detail ms=' ...)}"
         self.assertEqual(ts.parse_ms(log, "detail"), 2121)

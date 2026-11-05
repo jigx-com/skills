@@ -20,8 +20,10 @@ Confirm with the user, once:
 - the **test** solution to publish to, its organisation, and the app to run it in
   (branded apps need `targetAppName`). Never publish to or time against production or a
   working user's phone
-- the journeys to time: the sign-in sync (always), and the screens users open most
-  (3–6, e.g. the main list, a detail screen, a form)
+- the journeys to time: the sign-in sync (always), the cold start, and the screens
+  users open most (3–6, e.g. the main list, a detail screen, a form)
+- the platforms: iOS Simulator and Android (an emulator; a Google APIs image for sync
+  timing). Time both when the customer's users have both; run one at a time
 - realistic test data: a load that is fast because the test user has ten rows proves
   nothing
 
@@ -50,10 +52,10 @@ simulator, user and data for every run, before and after.
 
 | Area | Tool | Output |
 | --- | --- | --- |
-| Sync: time to ready, each scope and step, queue, timeouts | `track-load.py`, three runs (`pre-1..3`) | `perf-review/runs/` |
+| Sync: time to ready, each scope and step, queue, timeouts | `track-load.py`, three runs (`pre-1..3`; on Android `--android`, labels `pre-android-1..3`) | `perf-review/runs/` |
 | Queries: every datasource query on the device's real data | `time-queries.mjs` | `perf-review/before/timings.{json,md}` |
 | Actions: every `execute-sql` step (rolled back) and index build | `time-queries.mjs` (same run) | the same files |
-| Screens: tap to ready, including datasources, expressions and rendering | `time-screens.py`, three runs a screen | `perf-review/screens/pre.{json,md}` |
+| Screens and cold start: to the ready element, including datasources, expressions and rendering | `time-screens.py`, three runs a screen, per platform | `perf-review/screens/pre.{json,md}`, `pre-android.{json,md}` |
 | Expressions | no runtime timing exists; measured inside screen time, located by the audit (`per-row-datasource-read`, `filter-inside-map`) | — |
 
 ```sh
@@ -63,6 +65,9 @@ python3 <skill-directory>/scripts/track-load.py --list
 node <skill-directory>/scripts/time-queries.mjs <solution> --db <test-solution database> \
   --report perf-review/before/timings.md > perf-review/before/timings.json
 python3 <skill-directory>/scripts/time-screens.py perf-review/screens.json --label pre --out perf-review/screens
+# Android, same spec
+python3 <skill-directory>/scripts/track-load.py --android --solution <test-solution> --wait --out perf-review/runs --label pre-android-1 --scopes <scopes>
+python3 <skill-directory>/scripts/time-screens.py perf-review/screens.json --platform android --label pre-android --out perf-review/screens
 ```
 
 - **Sync**: arm the tracker, then sign in; repeat for `pre-2`, `pre-3`. Drive the
@@ -131,6 +136,7 @@ python3 <skill-directory>/scripts/track-load.py --solution <test-solution> --wai
 node <skill-directory>/scripts/time-queries.mjs <solution> --db <test-solution database> \
   --baseline perf-review/before/timings.json --report perf-review/after/timings.md > perf-review/after/timings.json
 python3 <skill-directory>/scripts/time-screens.py perf-review/screens.json --label post --out perf-review/screens --compare pre
+python3 <skill-directory>/scripts/time-screens.py perf-review/screens.json --platform android --label post-android --out perf-review/screens --compare pre-android
 python3 <skill-directory>/scripts/compare-runs.py perf-review/runs --before pre --after post
 python3 <skill-directory>/scripts/review-report.py perf-review --solution <name>
 ```

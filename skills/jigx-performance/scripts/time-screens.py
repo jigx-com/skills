@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Time how long Jigx screens take to open in the iOS Simulator, using Maestro.
+"""Time how long Jigx screens take to open in the iOS Simulator or on Android, using Maestro.
 
 Standard library only; needs Maestro (and Java) on the host. For each screen in a spec
 file it runs a generated Maestro flow --runs times: untimed setup steps to reach the
@@ -8,8 +8,18 @@ screen's ready element is visible, then steps to go back. The time includes the
 screen's datasources, expressions and rendering: Jigx exposes no render timing, so
 tap-to-ready is the user's wait. Maestro adds its own overhead (about 2.5-3 s for a
 static iOS screen on an M2 Pro, varying by ~300 ms run to run), so quote changes
-between runs on the same machine, not absolute values. Add a static control screen to
-the spec to see that overhead.
+between runs on the same machine and device, not absolute values. Add a static control
+screen to the spec to see that overhead.
+
+Android: an emulator or a phone connected over USB with USB debugging on (`adb devices`
+lists it). Pass --platform android (the default when no iOS Simulator is booted and adb
+sees a device) and --device <serial> when several are connected. The appId is the Android
+package (`adb shell pm list packages | grep jigx`). The same spec runs on both platforms
+when the texts match; put platform-only steps in "ios" / "android" keys of a step list.
+
+A screen with "start": "cold" times the app's own start: the app is stopped, then the
+span runs from launch to the ready element (start-up, solution load and the first
+datasources), with no tap.
 
 Spec (screens.json):
 
@@ -17,24 +27,29 @@ Spec (screens.json):
    "screens": [
      {"name": "appointments-list", "tap": "Appointments", "ready": "\\\\d{6}-\\\\d+",
       "after": [{"tap": "Home"}]},
+     {"name": "cold-start", "start": "cold", "ready": "Appointments"},
      {"name": "appointment-detail", "setup": [{"tap": "Appointments"}, {"wait": "\\\\d{6}-\\\\d+"}],
       "tap": {"text": "\\\\d{6}-\\\\d+", "index": 0}, "ready": "Appointment Details",
       "after": [{"tap": "Back"}, {"tap": "Home"}]}]}
 
 `tap`, `ready` and `wait` take a text regex (Maestro matches text as a regex) or an
-object with "text" or "id" and an optional "index". Start every screen from the same
+object with "text" or "id" and an optional "index"; {"gone": "<regex>"} waits until that
+text has disappeared (e.g. a "Preparing your data" banner). Other steps: {"scroll": true},
+{"input": "<text>"}, and {"back": true} for Android's back button. On Android a list row is
+one element holding all its texts, so `ready` and `wait` match anywhere in an element there. Start every screen from the same
 place (setup should get there from the app's home) and leave from it (after).
 
 Examples:
   python3 time-screens.py screens.json --label pre --runs 3 --out perf-review/screens
   python3 time-screens.py screens.json --label post --runs 3 --out perf-review/screens --compare pre
+  python3 time-screens.py screens.json --label pre-android --platform android --device emulator-5554
   python3 time-screens.py screens.json --print-flow appointments-list
 """
 import argparse
 import datetime
 import json
 import os
-import platform
+import platform as platform_mod
 import re
 import shutil
 import statistics
@@ -46,38 +61,64 @@ MARK = "JIGX_SCREEN"
 TIMEOUT_MS = 30000
 
 
-def selector(value):
+def contains(regex):
+    """Android merges a list row's texts into one element ("007351-1\\n2026-10-27"), and Maestro
+    matches the whole text, so a ready text there matches anywhere inside the element."""
+    return f"[\\s\\S]*(?:{regex})[\\s\\S]*"
+
+
+def selector(value, loose=False):
     if isinstance(value, str):
-        return json.dumps(value)
+        return json.dumps(contains(value) if loose else value)
     sel = {k: value[k] for k in ("text", "id", "index") if k in value}
+    if loose and "text" in sel:
+        sel["text"] = contains(sel["text"])
     return json.dumps(sel)
 
 
-def step_yaml(step):
+def step_yaml(step, platform="ios"):
     if "tap" in step:
         return [f"- tapOn: {selector(step['tap'])}"]
     if "wait" in step:
-        return ["- extendedWaitUntil:", f"    visible: {selector(step['wait'])}", f"    timeout: {step.get('timeout', TIMEOUT_MS)}"]
+        w = step["wait"]
+        gone = isinstance(w, dict) and "gone" in w
+        loose = platform == "android"
+        return ["- extendedWaitUntil:", f"    {'notVisible' if gone else 'visible'}: {selector(w['gone'] if gone else w, loose)}",
+                f"    timeout: {step.get('timeout', TIMEOUT_MS)}"]
     if "scroll" in step:
         return ["- scroll"]
+    if "back" in step:
+        return ["- back"]  # Android's back button; iOS has none, tap the screen's Back instead
     if "input" in step:
         return [f"- inputText: {json.dumps(step['input'])}"]
     raise ValueError(f"unknown step {step}")
 
 
-def flow(app_id, screen):
+def steps(value, platform):
+    """A step list, or {"ios": [...], "android": [...]} for steps that differ by platform."""
+    if isinstance(value, dict):
+        return value.get(platform, [])
+    return value or []
+
+
+def flow(app_id, screen, platform="ios"):
     """The Maestro flow for one timed run of one screen."""
     if not re.fullmatch(r"[\w.-]+", screen["name"]):
         raise ValueError(f"screen name {screen['name']!r}: use letters, digits, - and _")
-    lines = [f"appId: {app_id}", "---", "- launchApp:", "    stopApp: false"]
-    for s in screen.get("setup", []):
-        lines += step_yaml(s)
+    lines = [f"appId: {app_id}", "---"]
+    cold = screen.get("start") == "cold"
+    if cold:
+        lines += ["- stopApp"]
+    else:
+        lines += ["- launchApp:", "    stopApp: false"]
+    for s in steps(screen.get("setup"), platform):
+        lines += step_yaml(s, platform)
     lines += ["- evalScript: ${output.t0 = Date.now()}"]
-    lines += step_yaml({"tap": screen["tap"]})
-    lines += step_yaml({"wait": screen["ready"], "timeout": screen.get("timeout", TIMEOUT_MS)})
+    lines += ["- launchApp:", "    stopApp: false"] if cold else step_yaml({"tap": screen["tap"]})
+    lines += step_yaml({"wait": screen["ready"], "timeout": screen.get("timeout", TIMEOUT_MS)}, platform)
     lines += ["- evalScript: ${console.log('" + MARK + " " + screen["name"] + " ms=' + (Date.now() - output.t0))}"]
-    for s in screen.get("after", []):
-        lines += step_yaml(s)
+    for s in steps(screen.get("after"), platform):
+        lines += step_yaml(s, platform)
     return "\n".join(lines) + "\n"
 
 
@@ -86,11 +127,11 @@ def parse_ms(text, name):
     return int(m.group(1)) if m else None
 
 
-def run_once(app_id, screen, maestro, device=None):
+def run_once(app_id, screen, maestro, device=None, platform="ios"):
     with tempfile.TemporaryDirectory(prefix="jigx-screen-") as tmp:
         path = os.path.join(tmp, "flow.yaml")
         with open(path, "w", encoding="utf-8") as f:
-            f.write(flow(app_id, screen))
+            f.write(flow(app_id, screen, platform))
         cmd = [maestro] + (["--device", device] if device else []) + ["test", path, "--debug-output", os.path.join(tmp, "debug")]
         env = dict(os.environ, MAESTRO_CLI_NO_ANALYTICS="1")
         proc = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=TIMEOUT_MS / 1000 * 4)
@@ -102,8 +143,8 @@ def run_once(app_id, screen, maestro, device=None):
                     text += f.read()
         ms = parse_ms(text, screen["name"])
         if proc.returncode != 0 or ms is None:
-            failed = re.findall(r"(?:FAILED|Assertion is false|Element not found)[^\n]*", text)
-            return None, (failed[0] if failed else f"maestro exited {proc.returncode}")[:200]
+            failed = re.findall(r"[^\n]*(?:\.\.\. FAILED|Assertion is false|Element not found)[^\n]*", text)
+            return None, (failed[0].strip() if failed else f"maestro exited {proc.returncode}")[:200]
         return ms, None
 
 
@@ -161,10 +202,51 @@ def report(result, comparison=None):
     return "\n".join(lines) + "\n"
 
 
-def detect_app():
-    out = subprocess.run(["xcrun", "simctl", "listapps", "booted"], capture_output=True, text=True).stdout
-    ids = re.findall(r'CFBundleIdentifier = "?(com\.jigx\.[\w.-]+)"?;', out)
+def run(cmd):
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=30).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+
+def adb():
+    sdk = os.environ.get("ANDROID_HOME") or os.path.expanduser("~/Library/Android/sdk")
+    return shutil.which("adb") or os.path.join(sdk, "platform-tools", "adb")
+
+
+def android_devices():
+    return re.findall(r"^(\S+)\tdevice$", run([adb(), "devices"]), re.M)
+
+
+def detect_platform(device=None):
+    if device and (device in android_devices()):
+        return "android"
+    if "Booted" in run(["xcrun", "simctl", "list", "devices", "booted"]):
+        return "ios"
+    return "android" if android_devices() else "ios"
+
+
+def adb_shell(device, *cmd):
+    return run([adb()] + (["-s", device] if device else []) + ["shell", *cmd]).strip()
+
+
+def detect_app(platform="ios", device=None):
+    if platform == "android":
+        ids = re.findall(r"^package:(com\.jigx\.[\w.]+)$", adb_shell(device, "pm", "list", "packages", "com.jigx"), re.M)
+    else:
+        out = run(["xcrun", "simctl", "listapps", device or "booted"])
+        ids = re.findall(r'CFBundleIdentifier = "?(com\.jigx\.[\w.-]+)"?;', out)
     return ids[0] if len(ids) == 1 else None
+
+
+def describe_device(platform, device=None):
+    host = f"{platform_mod.node()} ({platform_mod.machine()})"
+    if platform != "android":
+        return f"iOS Simulator on {host}"
+    model, sdk = adb_shell(device, "getprop", "ro.product.model"), adb_shell(device, "getprop", "ro.build.version.sdk")
+    if adb_shell(device, "getprop", "ro.kernel.qemu") == "1":
+        return f"Android emulator {model} API {sdk} on {host}"
+    return f"Android {adb_shell(device, 'getprop', 'ro.product.manufacturer')} {model} API {sdk}"
 
 
 def main(argv=None):
@@ -175,8 +257,9 @@ def main(argv=None):
     p.add_argument("--out", default="perf-review/screens")
     p.add_argument("--only", help="comma-separated screen names")
     p.add_argument("--compare", help="label of an earlier run in --out to compare with")
-    p.add_argument("--app-id", help="bundle id; default: the spec's appId, else the one com.jigx.* app on the booted simulator")
-    p.add_argument("--device", help="simulator UDID when several are booted")
+    p.add_argument("--app-id", help="bundle id or Android package; default: the spec's appId (or appIdAndroid), else the one com.jigx.* app on the device")
+    p.add_argument("--platform", choices=["ios", "android"], help="default: android when --device is an adb serial or no iOS Simulator is booted and adb sees a device")
+    p.add_argument("--device", help="simulator UDID or adb serial when several are connected")
     p.add_argument("--print-flow", metavar="SCREEN", help="print the generated Maestro flow for one screen and exit")
     args = p.parse_args(argv)
     with open(args.spec, encoding="utf-8") as f:
@@ -185,24 +268,27 @@ def main(argv=None):
     if args.only:
         wanted = set(args.only.split(","))
         screens = [s for s in screens if s["name"] in wanted]
-    app_id = args.app_id or spec.get("appId") or detect_app()
+    plat = args.platform or spec.get("platform") or (None if args.print_flow else detect_platform(args.device)) or "ios"
+    app_id = args.app_id or (spec.get("appIdAndroid") if plat == "android" else None) or spec.get("appId")
     if args.print_flow:
-        print(flow(app_id or "<appId>", next(s for s in spec["screens"] if s["name"] == args.print_flow)), end="")
+        print(flow(app_id or "<appId>", next(s for s in spec["screens"] if s["name"] == args.print_flow), plat), end="")
         return 0
+    app_id = app_id or detect_app(plat, args.device)
     if not app_id:
-        p.error("no --app-id, no appId in the spec, and not exactly one com.jigx.* app on the booted simulator")
+        p.error(f"no --app-id, no appId in the spec, and not exactly one com.jigx.* app on the {plat} device")
     maestro = shutil.which("maestro") or os.path.expanduser("~/.maestro/bin/maestro")
     if not os.path.exists(maestro):
         p.error("Maestro is not installed: curl -Ls https://get.maestro.mobile.dev | bash (needs Java 17+)")
+    print(f"Timing on {plat} ({args.device or 'the only device'}), app {app_id}", file=sys.stderr, flush=True)
     version = subprocess.run([maestro, "--version"], capture_output=True, text=True).stdout.strip().splitlines()[-1:] or ["?"]
     results = {s["name"]: [] for s in screens}
     for i in range(args.runs):
         for s in screens:
-            ms, err = run_once(app_id, s, maestro, args.device)
+            ms, err = run_once(app_id, s, maestro, args.device, plat)
             results[s["name"]].append({"run": i + 1, "ms": ms, **({"error": err} if err else {})})
             print(f"{s['name']} run {i + 1}: " + (f"{ms} ms" if ms is not None else f"failed ({err})"), file=sys.stderr, flush=True)
-    result = {"label": args.label, "appId": app_id, "maestro": version[0], "runs": args.runs,
-              "device": f"iOS Simulator on {platform.node()} ({platform.machine()})",
+    result = {"label": args.label, "appId": app_id, "maestro": version[0], "runs": args.runs, "platform": plat,
+              "device": describe_device(plat, args.device),
               "recorded": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
               "screens": summarise(results)}
     os.makedirs(args.out, exist_ok=True)

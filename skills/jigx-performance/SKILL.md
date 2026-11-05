@@ -40,9 +40,11 @@ the user; ask as little as possible.
 audit [path]`**: steps 1 and 2 above, no question.
 
 Before any timing step, check what it needs and tell the user exactly what is missing
-and how to get it, in one message: a booted iOS Simulator with the Jigx app, Node
-22.5+, Maestro and Java 17+ (screen times only), and for SDK projects the `jigx_debug`
-MCP server. Skip a timing area whose tool is missing rather than stopping the review.
+and how to get it, in one message: a booted iOS Simulator or Android emulator with the
+Jigx app (a Google APIs image for Android sync timing), Node 22.5+, Maestro and Java
+17+ (screen times only), and for SDK projects the `jigx_debug` MCP server. Time both
+platforms when both are available, one at a time; close an emulator before starting
+another. Skip a timing area whose tool is missing rather than stopping the review.
 
 Loaded from the task instead of a command: when the user writes or changes a
 `datasource.sqlite` query, an `action.execute-sql` index or a list, follow "Build";
@@ -57,9 +59,10 @@ Follow `references/customer-review.md`:
    data.
 2. **Audit**: static scan and plan check into `perf-review/before/`.
 3. **Time the current solution** after publishing it to the test solution: sync
-   (`track-load.py`, three runs), every query and `execute-sql` action on the test
-   user's synced database (`time-queries.mjs`), and screen open times (`time-screens.py`
-   with Maestro, three runs a screen). Expressions have no runtime timing; they show in
+   (`track-load.py`, three runs; `--android` on an Android emulator), every query and
+   `execute-sql` action on the test user's synced database (`time-queries.mjs`), and the
+   cold start and screen open times (`time-screens.py` with Maestro, three runs a screen,
+   iOS and Android). Expressions have no runtime timing; they show in
    screen time and are located by the audit.
 4. **Propose** with the overview (`review-report.py`): changes grouped by section A–H,
    ordered by priority, each written as a diff in the solution's language (`.jigx` or
@@ -99,9 +102,10 @@ Follow `references/customer-review.md`:
    python3 <skill-directory>/scripts/check-plans.py <solution> --scans-only
    ```
 
-   Before a PR into main, audit main first and pass it as `--baseline main.json
-   --fail-on high`: the scan then lists what the branch adds and exits 1 on a new high
-   finding. `USAGE.md` has the steps and a CI job.
+   Before a PR, run `pr-check.mjs --base origin/<target branch>`: it audits every
+   solution the branch changes on the branch and on its target, lists what the branch
+   adds and fixes, and exits 1 on a new high finding. `ci/jigx-performance.yml` runs it
+   on every PR in GitHub Actions (`USAGE.md`).
 2. Read `references/measuring.md`. Get row **and byte** counts for the tables behind
    the slow screen on a real device, then export those tables.
 3. Profile the slow query on the host at 1x and 10x:
@@ -168,6 +172,9 @@ Follow `references/customer-review.md`:
 
 ## Scripts
 
+- `scripts/pr-check.mjs` - the PR regression check: audits each changed solution on the
+  branch and on the branch it merges into, fails on new findings at `--fail-on`; run in
+  CI by `ci/jigx-performance.yml`.
 - `scripts/check-performance.mjs` - dependency-free static scan of a YAML solution
   folder or `build/output.json`, with priorities, fixes and an optional Markdown report
   (`--report`), device sizing (`--db`), and a pre-PR gate (`--baseline`, `--fail-on`). Exits nonzero only on errors; most findings
@@ -177,12 +184,12 @@ Follow `references/customer-review.md`:
 - `scripts/check-plans.py` - query plans for every datasource and `execute-sql` read
   against the shipped indexes: full scans, indexes used and unused, CI guard file.
 - `scripts/track-load.py` - read-only live tracker of a sync or load in the iOS
-  Simulator: scopes, entries, queue, row counts, slow-datasource log lines, waterfall.
+  Simulator or a rooted Android emulator (`--android`): scopes, entries, queue, row counts, slow-datasource log lines, waterfall.
 - `scripts/time-queries.mjs` - every datasource query, `execute-sql` step (rolled back)
   and index build timed on a copy of a device database, parameters sampled from the
   data; `--baseline` compares with an earlier run. Node 22.5+.
-- `scripts/time-screens.py` - screen open times (tap to ready element) in the iOS
-  Simulator through generated Maestro flows; `--compare` flags only changes beyond run
+- `scripts/time-screens.py` - screen open and cold-start times (to a ready element) in
+  the iOS Simulator or on Android through generated Maestro flows; `--compare` flags only changes beyond run
   noise.
 - `scripts/review-report.py` - the review report: sync, query, action and screen times
   before and after, findings per section, changes applied, what was not verified.

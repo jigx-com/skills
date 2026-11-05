@@ -8,11 +8,12 @@ compares runs. Both are read-only on the device database.
 
 | What | How | Where |
 | --- | --- | --- |
-| Sync and load timeline: each scope and entry, queue size, row counts | `track-load.py`, sampling the solution database read-only every 0.25 s | iOS Simulator |
-| Slow datasources and errors during the run | `track-load.py` tails the simulator's `jigx.log.db` for WARNING/ERROR lines such as `Timeout for first snapshot` | iOS Simulator |
+| Sync and load timeline: each scope and entry, queue size, row counts | `track-load.py`, sampling the solution database read-only (every 0.25 s; 0.5 s on Android) | iOS Simulator; Android emulator with a Google APIs image (`--android`) |
+| Slow datasources and errors during the run | `track-load.py` tails the app's `jigx.log.db` for WARNING/ERROR lines such as `Timeout for first snapshot` | iOS Simulator; Android emulator (`--android`) |
 | Same signals on a phone | `jigx_debug` `track_logs` before the run, read after | real device |
 | Request start, finish and overlap per sync wave | a proxy capture (e.g. Proxyman HAR export) of the test solution only | simulator or device |
-| Screen ready: tap to the first row visible, including datasources, expressions and rendering | `time-screens.py`, a generated Maestro flow per screen | simulator |
+| Screen ready: tap to the first row visible, including datasources, expressions and rendering | `time-screens.py`, a generated Maestro flow per screen | iOS Simulator, Android emulator or Android phone |
+| Cold start: launch to the first data on the home screen | `time-screens.py` with a `"start": "cold"` screen | the same |
 | Every query, `execute-sql` step and index build on real data | `time-queries.mjs` on a copy of the test user's database | host |
 | One query's cost at 1x and 10x | `profile-query.py` on an exported database | host |
 
@@ -36,6 +37,29 @@ compared with `= @p` gets a real value sampled from that column; others are NULL
 marked. Run it on the database the test user's sync just filled, the same one before
 and after: on a near-empty database every query takes a fraction of a millisecond and
 nothing ranks.
+
+**Android.** Time Android as well as iOS: rendering, lists and expressions cost
+differently there, and low-end Android phones are the slowest devices most customers
+use.
+
+- Screens: the same spec runs with `--platform android` on an emulator or a phone with
+  USB debugging (`adb devices`). A list row is one element on Android holding all its
+  texts, so the script matches `ready` texts anywhere in an element there; pick a text
+  only the target screen shows (a row's date format, not an id that Home also shows).
+  `{"back": true}` presses Android's back button; per-platform steps go in
+  `{"ios": [...], "android": [...]}`.
+- Sync: `track-load.py --android` reads the app's databases on the emulator with the
+  emulator's own `sqlite3`, read-only. It needs `adb root`, which only **Google APIs**
+  system images allow (not "Google Play" ones): `sdkmanager
+  "system-images;android-31;google_apis;arm64-v8a"`, then an AVD from it, and install the
+  Jigx APK (`adb install`; pull it from a Play emulator with `adb shell pm path <package>`
+  and `adb pull`). A phone's app files are not reachable, so on a phone time the
+  sign-in with a cold-start screen instead.
+- Queries: copy the database off the emulator after the sync (`adb exec-out "sqlite3
+  <db> '.backup /data/local/tmp/copy.db'"`, then `adb pull`) and run `time-queries.mjs`
+  on the copy.
+- Run one platform at a time and never compare an Android run with an iOS one; the
+  report records the device.
 
 ## Run
 
@@ -109,7 +133,7 @@ nothing ranks.
 - Record build, simulator, solution and data set with every run; `compare-runs.py`
   refuses to hide a machine change, but it cannot see a data change.
 - Median of three or more, never one run. Report the spread when runs disagree widely.
-- Simulator timings show relative change on that machine. Do not quote them as device
+- Simulator and emulator timings show relative change on that machine. Do not quote them as device
   timings; confirm a large win on the slowest supported device.
 - Keep evidence sanitised: the scripts keep only scope and entry states, counts and
   redacted log lines. Do not add request bodies or headers to saved runs.

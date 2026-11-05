@@ -22,8 +22,10 @@ Only entry states are kept from `details`: it also holds function parameters,
 which can carry URLs and credentials. Log lines keep level, category and a
 redacted message; `additionalParameters` is never read.
 
-Simulator only: a real device's files are not reachable from the host, and the
-debug bridge (~5 s per query) is too slow to time anything. Read
+Android: a Google APIs emulator (not "Google Play": only those allow `adb root`). Pass
+--android [serial]; the databases are read on the emulator with its own sqlite3 over
+adb, read-only, about every half second. A phone's app files are not reachable, and
+the debug bridge (~5 s per query) is too slow to time anything. Read
 references/run-and-track.md.
 
 Examples:
@@ -31,6 +33,7 @@ Examples:
   python3 track-load.py --solution my-solution-test --label pre-1 --table orders
   python3 track-load.py --solution my-solution-test --wait --scopes sync-base,sync-lookups --label pre-2
   python3 track-load.py --db path/to/jigx.solution.___x___.<uuid>.db --scopes sync-base,sync-lookups
+  python3 track-load.py --android --solution my-solution-test --wait --label pre-android-1
 """
 import argparse
 import contextlib
@@ -40,7 +43,9 @@ import json
 import os
 import platform
 import re
+import shutil
 import sqlite3
+import subprocess
 import sys
 import time
 
@@ -61,8 +66,69 @@ def iso(ms):
     return datetime.datetime.fromtimestamp(ms / 1000, datetime.timezone.utc).isoformat(timespec="milliseconds")
 
 
-def solution_dbs(name="*"):
+def solution_dbs(name="*", android=None):
+    if android:
+        return android_dbs(android, name)
     return sorted(glob.glob(os.path.join(SIMULATORS, "*", DB_GLOB.format(name=name))), key=os.path.getmtime, reverse=True)
+
+
+def adb():
+    sdk = os.environ.get("ANDROID_HOME") or os.path.expanduser("~/Library/Android/sdk")
+    return shutil.which("adb") or os.path.join(sdk, "platform-tools", "adb")
+
+
+def android_serial(value):
+    """The emulator to read: the one given, else the only adb device. Switches adbd to root."""
+    devices = re.findall(r"^(\S+)\tdevice$", subprocess.run([adb(), "devices"], capture_output=True, text=True).stdout, re.M)
+    serial = value if value not in (None, True, "") else (devices[0] if len(devices) == 1 else None)
+    if not serial or serial not in devices:
+        raise SystemExit(f"no Android device {value or ''} (adb devices: {', '.join(devices) or 'none'}); pass --android <serial>")
+    out = subprocess.run([adb(), "-s", serial, "root"], capture_output=True, text=True).stdout
+    if "cannot run as root" in out:
+        raise SystemExit("this emulator cannot run adb as root: use a Google APIs system image, not Google Play")
+    subprocess.run([adb(), "-s", serial, "wait-for-device"], timeout=60)
+    return serial
+
+
+def android_dbs(serial, name="*"):
+    pattern = f"jigx.solution.___{name}___.*.db"
+    out = subprocess.run([adb(), "-s", serial, "shell", f"f=$(find /data/data/com.jigx.* -name '{pattern}' 2>/dev/null); [ -n \"$f\" ] && ls -t $f"],
+                         capture_output=True, text=True, timeout=30).stdout
+    seen, paths = set(), []
+    for line in out.split():
+        if line not in seen:
+            seen.add(line)
+            paths.append(f"adb:{serial}:{line}")
+    return paths
+
+
+class Rows(list):
+    def fetchone(self):
+        return self[0] if self else None
+
+
+class AdbDb:
+    """A database on a rooted Android emulator, read with the device's sqlite3 (read-only)."""
+    NULL = "<<NULL>>"
+
+    def __init__(self, serial, path):
+        self.serial, self.path = serial, path
+
+    def execute(self, sql, params=()):
+        for value in params:  # only integer parameters are used
+            sql = sql.replace("?", str(int(value)), 1)
+        script = f'.mode list\n.separator "\\037" "\\036"\n.nullvalue "{self.NULL}"\n{sql};\n'
+        proc = subprocess.run([adb(), "-s", self.serial, "shell", "sqlite3", "-readonly", self.path],
+                              input=script, capture_output=True, text=True, timeout=20)
+        if proc.returncode or "Error" in proc.stderr:
+            raise sqlite3.Error(proc.stderr.strip() or f"sqlite3 exited {proc.returncode}")
+        return Rows(tuple(self.value(v) for v in row.split("\x1f"))
+                    for row in proc.stdout.split("\x1e") if row.strip("\r\n"))
+
+    def value(self, v):
+        if v == self.NULL:
+            return None
+        return int(v) if re.fullmatch(r"-?\d+", v) else float(v) if re.fullmatch(r"-?\d+\.\d+", v) else v
 
 
 def solution_name(path):
@@ -72,6 +138,9 @@ def solution_name(path):
 
 def connect(path):
     """Read-only connection that closes on exit (sqlite3's own context manager only commits)."""
+    if path.startswith("adb:"):
+        serial, device_path = path[4:].split(":", 1)
+        return contextlib.nullcontext(AdbDb(serial, device_path))
     return contextlib.closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=0.2))
 
 
@@ -227,7 +296,8 @@ def summarise(label, db, samples, result, armed, ready_at, logs, final, scopes):
                  for m in [re.search(r"Missing ID or value of entity(?: \((\d+) times\))?", r["message"])] if m)
     return {
         "label": label,
-        "machine": f"host {platform.node()} {platform.machine()} {platform.system()} (iOS Simulator)",
+        "machine": (f"Android emulator {db.split(':')[1]} on host {platform.node()} {platform.machine()}" if db.startswith("adb:")
+                    else f"host {platform.node()} {platform.machine()} {platform.system()} (iOS Simulator)"),
         "solution": solution_name(db),
         "armed_at": iso(armed),
         "result": result,
@@ -314,6 +384,8 @@ def track(db, label, out, tables=(), scopes=(), interval=0.25, settle=5.0, timeo
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--list", action="store_true", help="list solution databases in local simulators, newest first")
+    p.add_argument("--android", nargs="?", const=True, metavar="SERIAL",
+                   help="read a rooted Android emulator (Google APIs image) instead of the iOS Simulator")
     p.add_argument("--db", help="path to a jigx.solution.___<name>___.<uuid>.db file")
     p.add_argument("--solution", help="solution name; finds the newest matching simulator database")
     p.add_argument("--label", default=datetime.datetime.now().strftime("run-%H%M%S"),
@@ -328,19 +400,23 @@ def main(argv=None):
     p.add_argument("--settle", type=float, default=5.0, help="seconds ready must hold before stopping")
     p.add_argument("--timeout", type=float, default=900.0)
     args = p.parse_args(argv)
+    android = android_serial(args.android) if args.android else None
+    if android and args.interval == 0.25:
+        args.interval = 0.5  # each read is an adb round trip
     if args.list:
-        for path in solution_dbs():
-            print(f"{solution_name(path):40} {datetime.datetime.fromtimestamp(os.path.getmtime(path)):%Y-%m-%d %H:%M}  {path}")
+        for path in solution_dbs(android=android):
+            when = "" if android else f"{datetime.datetime.fromtimestamp(os.path.getmtime(path)):%Y-%m-%d %H:%M}"
+            print(f"{solution_name(path):40} {when:16}  {path}")
         return 0
     db = args.db
     if not db and args.solution:
-        found = solution_dbs(args.solution)
+        found = solution_dbs(args.solution, android)
         if not found and args.wait:
             print(f"Waiting for a database for '{args.solution}'. Sign in now.", flush=True)
             deadline = time.time() + args.timeout
             while not found and time.time() < deadline:
                 time.sleep(0.5)
-                found = solution_dbs(args.solution)
+                found = solution_dbs(args.solution, android)
         if not found:
             p.error(f"no simulator database for solution '{args.solution}'; run --list, or pass --wait")
         db = found[0]

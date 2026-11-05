@@ -9,7 +9,8 @@ threshold, not an SLA. A change smaller than --min-change seconds (default 0.5, 
 samples at track-load.py's 0.25 s interval) is reported as "same": entry times are
 only as precise as the sampling, so a one-sample step is not a regression.
 
-Writes <folder>/comparison.md and comparison.json, and prints the markdown.
+Writes <folder>/comparison.md and comparison.json, and prints the markdown. Android runs
+(--before pre-android --after post-android) write comparison-android.md and .json.
 Exits 1 when the total time regressed past the threshold or any run did not reach
 ready. Read references/run-and-track.md.
 
@@ -20,13 +21,16 @@ import argparse
 import glob
 import json
 import os
+import re
 import statistics
 import sys
 
 
 def load(folder, prefix):
+    """Runs labelled <prefix> or <prefix>-<n>: "pre" takes pre-1..3, not pre-android-1."""
     runs = []
-    for path in sorted(glob.glob(os.path.join(folder, f"{prefix}*-summary.json"))):
+    label = re.compile(rf"{re.escape(prefix)}(?:-\d+)?-summary\.json")
+    for path in sorted(p for p in glob.glob(os.path.join(folder, f"{prefix}*-summary.json")) if label.fullmatch(os.path.basename(p))):
         with open(path, encoding="utf-8") as f:
             runs.append(json.load(f))
     return runs
@@ -126,9 +130,10 @@ def main(argv=None):
         p.error(f"need {args.before}*-summary.json and {args.after}*-summary.json in {args.folder}")
     report = compare(before, after, args.threshold, args.min_change)
     md = markdown(report)
-    with open(os.path.join(args.folder, "comparison.json"), "w", encoding="utf-8") as f:
+    name = "comparison-android" if args.before.endswith("-android") else "comparison"
+    with open(os.path.join(args.folder, f"{name}.json"), "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2)
-    with open(os.path.join(args.folder, "comparison.md"), "w", encoding="utf-8") as f:
+    with open(os.path.join(args.folder, f"{name}.md"), "w", encoding="utf-8") as f:
         f.write(md)
     print(md)
     total = report["rows"][0]

@@ -1,0 +1,61 @@
+# Jigx performance check on every pull request.
+#
+# Copy to .github/workflows/jigx-performance.yml in a Jigx solution repo, on every
+# long-lived branch PRs merge into (main, release branches): GitHub runs the workflow
+# file from the PR's merge result. It audits each Jigx solution the PR changes, on the
+# PR and on the branch it merges into, and fails when the PR adds a high-priority
+# finding. The report lands in the run's summary. Make the check required in branch
+# protection to block such merges.
+name: Jigx performance
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: jigx-performance-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    name: Jigx performance
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      FAIL_ON: high          # high, medium or low
+    steps:
+      - name: Check out the pull request
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0     # the target branch's history, for the comparison
+
+      - name: Check out the Jigx skills
+        uses: actions/checkout@v4
+        with:
+          repository: jigx-com/skills
+          ref: main
+          path: .jigx-skills
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Compare with ${{ github.base_ref }}
+        run: |
+          node .jigx-skills/skills/jigx-performance/scripts/pr-check.mjs \
+            --base "origin/${{ github.base_ref }}" --fail-on "$FAIL_ON" \
+            --report jigx-performance.md > jigx-performance.json
+
+      - name: Add the report to the summary
+        if: always()
+        run: cat jigx-performance.md >> "$GITHUB_STEP_SUMMARY" || true
+
+      - name: Keep the full results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jigx-performance
+          path: jigx-performance.*

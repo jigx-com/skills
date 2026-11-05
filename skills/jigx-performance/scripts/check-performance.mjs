@@ -864,7 +864,8 @@ async function main() {
     if (added) console.error(`${added.length} finding(s) not in the baseline.`);
     for (const f of gated) console.error(`[${f.priority}] ${f.code} ${f.where}: ${f.message}`);
     if (gated.length) console.error(`${gated.length} ${added ? 'new ' : ''}finding(s) at ${failOn} priority or above.`);
-    process.exitCode = gated.length || findings.some(x => x.severity === 'error') ? 1 : 0;
+    // With a baseline, only errors this branch adds fail the run, like the gated findings.
+    process.exitCode = gated.length || (added ?? findings).some(x => x.severity === 'error') ? 1 : 0;
   } catch (error) { console.error(`Performance check failed: ${error.message}`); process.exitCode = 2; }
 }
 

@@ -15,8 +15,8 @@ Claude:
 2. audits it in a few seconds and shows each confirmed problem as *what is wrong ·
    where · the fix*, by priority (full list in `perf-review/before/audit.md`)
 3. asks what next:
-   - **Time it and fix it**: times the sync, every query and action, and the screens
-     you open most in the iOS Simulator; proposes fixes as diffs in your language
+   - **Time it and fix it**: times the sync, every query and action, the app's cold
+     start and the screens you open most, in the iOS Simulator and on Android; proposes fixes as diffs in your language
      (`.jigx` or `src/*.ts`), grouped by section and ordered by priority; applies only
      what you approve; publishes to your **test** solution, times everything again and
      reports what got faster, what did not move, and any regression
@@ -35,38 +35,48 @@ approve it, and nothing is ever published to or timed against production.
 | Audit | Node 18+; Ruby for YAML folders (macOS ships it) |
 | Time queries and actions | Node 22.5+ and a test user signed in and synced in the iOS Simulator |
 | Time screens | Maestro and Java 17+ (`curl -Ls https://get.maestro.mobile.dev \| bash`) |
+| Time on Android | Android SDK platform-tools (`adb`) and an emulator or a phone with USB debugging; for sync timing a **Google APIs** emulator image (not Google Play), which allows `adb root` |
 | Publish | SDK: the `jigx_debug` MCP server. YAML: Jigx Builder in VS Code |
 
 Claude checks these before timing and tells you what is missing.
 
-## Before every PR into main
+## Every PR: the regression check
 
-From the solution repo, on your branch (`$PERF` is the skill's `scripts` folder, e.g.
-`~/.claude/skills/jigx-performance/scripts`):
+Each PR is checked against the branch it merges into. The check audits every Jigx
+solution the PR changes, on the PR and on its target branch (main, a release branch,
+a customer branch), and fails when the PR adds a high-priority finding. The comparison
+is at the merge base, so only the PR's own changes count, and findings it fixes are
+listed too.
 
-```sh
-# 1. Audit main, as the baseline
-git fetch origin
-git worktree add ../perf-base origin/main
-node $PERF/check-performance.mjs ../perf-base/<solution folder> > /tmp/perf-base.json
-git worktree remove ../perf-base
+**In CI (set up once per solution repo).** Copy `ci/jigx-performance.yml` from this
+skill to `.github/workflows/jigx-performance.yml` on every long-lived branch PRs merge
+into, then make the "Jigx performance" check required in branch protection. It runs on
+every PR, however it was opened, and puts the report in the run's summary:
 
-# 2. Audit your branch against it, failing on new high findings
-node $PERF/check-performance.mjs <solution folder> \
-  --baseline /tmp/perf-base.json --fail-on high --report audit.md > audit.json
+```text
+| Solution      | Target                        | This branch                   | New | Fixed |
+| AcumaticaBase | 4 high · 315 medium · 781 low | 4 high · 306 medium · 778 low |  17 |    29 |
 ```
 
-For an SDK project, build both checkouts first and pass `build/output.json` instead of
-the folder. Or ask Claude: `/jigx-performance audit, compared with main`.
+**On your machine, before opening the PR** (or ask Claude: `/jigx-performance audit,
+compared with main`):
+
+```sh
+node $PERF/pr-check.mjs --base origin/main --report perf-check.md
+```
+
+`$PERF` is the skill's `scripts` folder, e.g. `~/.claude/skills/jigx-performance/scripts`.
+Run it from anywhere in the repo; `--base` is the branch the PR goes into.
 
 - **Exit 0**: nothing new at high priority. Open the PR.
 - **Exit 1**: the branch adds a high finding (printed with file and fix). Fix it, or
   explain in the PR why it stays.
-- **Exit 2**: the scan could not run (bad path, missing build).
+- **Exit 2**: the check could not run (a solution failed to load or build).
 
-`--fail-on medium` shows the new medium findings too; list any you keep in the PR
-description. A finding is new when its type, file and message are not on main; moving
-a block inside a file does not make it new.
+`--fail-on medium` fails on new medium findings too. A finding is new when its type,
+file and message are not on the target; moving a block inside a file does not make it
+new. SDK projects are built on both sides (`npm ci && npx jigx build`; change it with
+`--build`).
 
 ## Reading the audit
 
@@ -119,47 +129,14 @@ took them from 117 s to 24 s.
 
 | Area | How | Note |
 | --- | --- | --- |
-| Sync | the simulator's sync tables, sampled live, three sign-ins | time to ready, each scope and step; snapshot timeouts, rows hashed for lack of an id, and every expression error with its expression and screen |
+| Sync | the app's sync tables, sampled live, three sign-ins, on the iOS Simulator or a Google APIs Android emulator | time to ready, each scope and step; snapshot timeouts, rows hashed for lack of an id, and every expression error with its expression and screen |
 | Queries and actions | every query, `execute-sql` step and index build run on a copy of the test user's database | host times: right for ranking and before/after, a phone is slower |
-| Screens | Maestro taps and waits for an element that appears once the data is there, three runs | includes datasources, expressions and rendering |
+| Screens | Maestro taps and waits for an element that appears once the data is there, three runs, on the iOS Simulator or Android | includes datasources, expressions and rendering |
+| Cold start | Maestro stops the app, launches it and waits for the first data on Home | start-up, solution load and the first datasources |
 | Expressions | no separate timing exists in Jigx | inside screen time; the audit finds the costly ones |
 
 A screen counts as faster or slower only when every run on one side beats every run
 on the other by 250 ms or more; smaller moves are noise.
-
-## In CI (optional)
-
-The pre-PR check as a GitHub Actions job on every PR into main:
-
-```yaml
-name: Performance audit
-on:
-  pull_request:
-    branches: [main]
-jobs:
-  audit:
-    runs-on: ubuntu-latest
-    env:
-      SOLUTION: path/to/solution   # the folder with index.jigx
-      PERF: .jigx-skills/skills/jigx-performance/scripts
-    steps:
-      - uses: actions/checkout@v4
-        with: {fetch-depth: 0}
-      - uses: actions/checkout@v4
-        with: {repository: jigx-com/skills, path: .jigx-skills}
-      - uses: actions/setup-node@v4
-        with: {node-version: 22}
-      - run: |
-          git worktree add ../perf-base origin/${{ github.base_ref }}
-          node $PERF/check-performance.mjs ../perf-base/$SOLUTION > ../perf-base.json
-          node $PERF/check-performance.mjs $SOLUTION --baseline ../perf-base.json \
-            --fail-on high --report audit.md > audit.json
-      - if: always()
-        run: cat audit.md >> "$GITHUB_STEP_SUMMARY"
-```
-
-For an SDK project, add the install and build steps for both checkouts and point
-`SOLUTION` at `build/output.json`.
 
 ## Scripts
 
@@ -169,10 +146,11 @@ YAML folder or an SDK `build/output.json`.
 | Script | Does |
 | --- | --- |
 | `check-performance.mjs` | the audit (`--report`, `--db`, `--baseline`, `--fail-on`) |
+| `pr-check.mjs` | the PR regression check against the target branch (CI: `ci/jigx-performance.yml`) |
 | `check-plans.py` | query plans: full scans, unused indexes, CI guards |
 | `time-queries.mjs` | every query, action and index build timed on a device database copy (`--baseline`) |
-| `time-screens.py` | screen open times through Maestro (`--compare`) |
-| `track-load.py` / `compare-runs.py` | live sync tracking in the simulator; before/after medians |
+| `time-screens.py` | screen and cold-start times through Maestro, iOS or Android (`--platform`, `--compare`) |
+| `track-load.py` / `compare-runs.py` | live sync tracking in the iOS Simulator or an Android emulator (`--android`); before/after medians |
 | `profile-query.py` | one query at 1x and 10x data, before and after an index |
 | `review-report.py` | the before/after report |
 

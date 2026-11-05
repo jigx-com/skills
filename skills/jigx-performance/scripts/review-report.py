@@ -12,6 +12,8 @@ Standard library only. Reads a review folder laid out as:
   <folder>/after/timings.json   time-queries.mjs --baseline before/timings.json (optional)
   <folder>/screens/pre.json     time-screens.py --label pre (optional)
   <folder>/screens/post.json    time-screens.py --label post --compare pre (optional)
+  <folder>/runs/comparison-android.json, screens/pre-android.json, post-android.json
+                                the same on Android (optional)
   <folder>/changes.json         [{"section": "B", "change": "...", "files": [...]}] (optional)
 
 and writes <folder>/report.md (and prints it): sync, query, action and screen times
@@ -168,6 +170,13 @@ def report(folder, solution=None):
     lines += ["## Sync", ""] + timing_lines(comparison) + [""]
     lines += ["## Queries and actions", ""] + query_lines(timings_before, timings_after) + [""]
     lines += ["## Screens", ""] + screen_lines(screens_pre, screens_post) + [""]
+    # Android, when it was timed too (track-load.py --android, time-screens.py --platform android).
+    android_sync = read(folder, "runs", "comparison-android.json")
+    android_pre, android_post = read(folder, "screens", "pre-android.json"), read(folder, "screens", "post-android.json")
+    if android_sync:
+        lines += ["## Sync (Android)", ""] + timing_lines(android_sync) + [""]
+    if android_pre:
+        lines += ["## Screens (Android)", ""] + screen_lines(android_pre, android_post) + [""]
     lines += ["## Findings by section", ""]
     pri = (read(folder, "before", "static.json") or {}).get("byPriority")
     if pri:

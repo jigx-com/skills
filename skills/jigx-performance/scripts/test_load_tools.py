@@ -254,5 +254,32 @@ class ReviewReportTest(unittest.TestCase):
         self.assertIn("| list | 2.10 s | 1.50 s | -28.6% | faster |", text)
 
 
+
+class AndroidReadTest(unittest.TestCase):
+    def test_ios_and_android_runs_are_not_mixed(self):
+        folder = tempfile.mkdtemp()
+        for label in ("pre-1", "pre-2", "pre-android-1", "prefix-1", "pre"):
+            with open(os.path.join(folder, f"{label}-summary.json"), "w") as f:
+                json.dump({"label": label}, f)
+        self.assertEqual([r["label"] for r in cr.load(folder, "pre")], ["pre-1", "pre-2", "pre"])
+        self.assertEqual([r["label"] for r in cr.load(folder, "pre-android")], ["pre-android-1"])
+
+    def test_device_sqlite_output_is_parsed_into_rows(self):
+        class Done:
+            returncode, stderr = 0, ""
+            stdout = "s1\x1fsynced\x1f{\"a,b\": {\"state\": \"synced\"}}\n\x1f1730790000000\x1f<<NULL>>\x1e\n"
+        calls = []
+        orig = tl.subprocess.run
+        tl.subprocess.run = lambda cmd, **kw: (calls.append((cmd, kw["input"])), Done)[1]
+        try:
+            rows = tl.AdbDb("emulator-5556", "/data/x.db").execute("SELECT * FROM t WHERE id > ? AND ts >= ?", (5, 7.9))
+        finally:
+            tl.subprocess.run = orig
+        self.assertEqual(rows, [("s1", "synced", '{"a,b": {"state": "synced"}}\n', 1730790000000, None)])
+        self.assertEqual(rows.fetchone()[0], "s1")
+        self.assertIn("-readonly", calls[0][0])
+        self.assertIn("WHERE id > 5 AND ts >= 7;", calls[0][1])
+
+
 if __name__ == "__main__":
     unittest.main()
