@@ -54,7 +54,9 @@ use.
   "system-images;android-31;google_apis;arm64-v8a"`, then an AVD from it, and install the
   Jigx APK (`adb install`; pull it from a Play emulator with `adb shell pm path <package>`
   and `adb pull`). A phone's app files are not reachable, so on a phone time the
-  sign-in with a cold-start screen instead.
+  sign-in with a cold-start screen instead. Each sample is an adb round trip, so entry times have about
+  0.6 s resolution (scope times use the runtime's own timestamps). Android words the
+  hash warning "Missing entity id, falling back to hash"; both wordings are counted.
 - Queries: copy the database off the emulator after the sync (`adb exec-out "sqlite3
   <db> '.backup /data/local/tmp/copy.db'"`, then `adb pull`) and run `time-queries.mjs`
   on the copy.

@@ -256,6 +256,11 @@ class ReviewReportTest(unittest.TestCase):
 
 
 class AndroidReadTest(unittest.TestCase):
+    def test_android_hash_warning_counts(self):
+        logs = [{"level": "WARNING", "category": "get-entity-id", "message": "Missing entity id, falling back to hash"},
+                {"level": "WARNING", "category": "x", "message": "Performance Issue: Missing ID or value of entity (3 times) -> using hash function"}]
+        self.assertEqual(tl.summarise("a", "x.db", [], "ready", 0, None, logs, None, [])["hash_fallbacks"], 4)
+
     def test_ios_and_android_runs_are_not_mixed(self):
         folder = tempfile.mkdtemp()
         for label in ("pre-1", "pre-2", "pre-android-1", "prefix-1", "pre"):

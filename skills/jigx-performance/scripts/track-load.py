@@ -8,8 +8,8 @@ read-only (`?mode=ro`) and never writes to them. Every --interval seconds it rea
   * the SDK `_commandQueue` size
   * row counts for any --table you name
   * new WARNING/ERROR runtime log lines, e.g. "Timeout for first snapshot", and the
-    runtime's "Missing ID or value of entity ... using hash function" (a datasource with
-    no id column, so every row is hashed)
+    runtime's "Missing ID or value of entity ... using hash function" (Android: "Missing
+    entity id, falling back to hash"; a datasource with no id column, so every row is hashed)
 
 It prints one live line per change, appends every changed sample to
 <out>/<label>-samples.jsonl, and stops when the load is ready (every tracked scope
@@ -293,7 +293,7 @@ def summarise(label, db, samples, result, armed, ready_at, logs, final, scopes):
         if m:
             snapshot[m.group(1)] = snapshot.get(m.group(1), 0) + 1
     hashed = sum(int(m.group(1) or 1) for r in logs
-                 for m in [re.search(r"Missing ID or value of entity(?: \((\d+) times\))?", r["message"])] if m)
+                 for m in [re.search(r"(?:Missing ID or value of entity|Missing entity id)(?: \((\d+) times\))?", r["message"])] if m)
     return {
         "label": label,
         "machine": (f"Android emulator {db.split(':')[1]} on host {platform.node()} {platform.machine()}" if db.startswith("adb:")
@@ -418,7 +418,8 @@ def main(argv=None):
                 time.sleep(0.5)
                 found = solution_dbs(args.solution, android)
         if not found:
-            p.error(f"no simulator database for solution '{args.solution}'; run --list, or pass --wait")
+            p.error(f"no {'Android emulator' if android else 'simulator'} database for solution '{args.solution}'"
+                    + ("; nobody signed in before --timeout" if args.wait else "; run --list, or pass --wait"))
         db = found[0]
     if not db:
         p.error("give --db or --solution (see --list)")
