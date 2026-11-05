@@ -289,9 +289,46 @@ def expression_errors(logs):
             for (e, err, sc), n in sorted(groups.items(), key=lambda kv: -kv[1])]
 
 
+def scope_runs(samples, armed):
+    """Every sync of every scope started after arming: {scope: [[start_ms, end_ms or None], ...]}.
+    A scope that syncs again (a screen's onFocus after the sign-in sync) shows as a second run,
+    which the final state alone hides: it keeps only the last start."""
+    runs = {}
+    for sample in samples:
+        for sid, v in sample["scopes"].items():
+            start, end = v.get("startedAt"), v.get("syncedAt")
+            if not start or start < armed:
+                continue
+            spans = runs.setdefault(sid, [])
+            if not spans or spans[-1][0] != start:
+                spans.append([start, None])
+            if end and end >= start:
+                spans[-1][1] = end
+    return runs
+
+
+def busy_seconds(runs, until=None):
+    """Time at least one scope was syncing: the union of every run, an unfinished one up to `until`."""
+    spans = sorted([a, b or until] for spans in runs.values() for a, b in spans if b or until)
+    total, cur = 0, None
+    for a, b in spans:
+        if cur and a <= cur[1]:
+            cur[1] = max(cur[1], b)
+        else:
+            if cur:
+                total += cur[1] - cur[0]
+            cur = [a, b]
+    if cur:
+        total += cur[1] - cur[0]
+    return round(total / 1000, 2)
+
+
 def summarise(label, db, samples, result, armed, ready_at, logs, final, scopes):
     run = tracked(final, scopes, armed) if final else {}
+    runs = scope_runs(samples, armed)
     starts = [v["startedAt"] for v in run.values() if v and v["startedAt"]]
+    # The first start of a tracked scope, not its last: a second sync moves the final startedAt.
+    starts += [spans[0][0] for sid, spans in runs.items() if sid in run]
     first_start = min(starts) if starts else None
     entries = entry_timings(samples, armed)
     snapshot = {}
@@ -310,6 +347,11 @@ def summarise(label, db, samples, result, armed, ready_at, logs, final, scopes):
         "result": result,
         "first_start_to_ready_s": round((ready_at - first_start) / 1000, 2) if ready_at and first_start else None,
         "arm_to_ready_s": round((ready_at - armed) / 1000, 2) if ready_at else None,
+        # All sync work, also after ready: a second sync of the same scope halves nothing in
+        # first_start_to_ready_s but doubles this.
+        "sync_busy_s": busy_seconds(runs, now_ms() if result != "ready" else None) if runs else None,
+        "scope_starts": {sid: len(spans) for sid, spans in sorted(runs.items())},
+        "repeated_scopes": sorted(sid for sid, spans in runs.items() if len(spans) > 1),
         "scopes": {sid: {"state": v["state"],
                          "duration_s": round((v["syncedAt"] - v["startedAt"]) / 1000, 2)
                          if v and v["syncedAt"] and v["startedAt"] and v["syncedAt"] >= v["startedAt"] else None}
@@ -378,6 +420,10 @@ def track(db, label, out, tables=(), scopes=(), interval=0.25, settle=5.0, timeo
     total = summary["first_start_to_ready_s"]
     print("\n".join(["", f"{label}: {result}, first start to ready {'n/a' if total is None else f'{total}s'}", ""]
                     + waterfall(summary["entries"])), file=stream)
+    print(f"Sync busy {summary['sync_busy_s']}s, {sum(summary['scope_starts'].values())} scope start(s)", file=stream)
+    for sid in summary["repeated_scopes"]:
+        print(f"WARNING: {sid} synced {summary['scope_starts'][sid]} times in one run; look for an onFocus or "
+              "onLoad that starts the same sync again", file=stream)
     if summary["snapshot_timeouts"]:
         print(f"Timeout for first snapshot: {summary['snapshot_timeouts']}", file=stream)
     if summary.get("hash_fallbacks"):

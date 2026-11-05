@@ -52,6 +52,11 @@ class TimeScreensTest(unittest.TestCase):
         verdicts = {r["screen"]: r["verdict"] for r in ts.compare(before, after)}
         self.assertEqual(verdicts, {"same": "same", "fast": "faster", "slow": "SLOWER", "tiny": "same"})
 
+    def test_one_successful_run_gives_no_verdict(self):
+        before = result({"control": [2000, 2050, 2100]})
+        after = result({"control": [3400, None, None]})
+        self.assertTrue(ts.compare(before, after)[0]["verdict"].startswith("not comparable"))
+
 
 if __name__ == "__main__":
     unittest.main()

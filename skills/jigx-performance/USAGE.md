@@ -34,9 +34,9 @@ approve it, and nothing is ever published to or timed against production.
 | --- | --- |
 | Audit | Node 18+; Ruby for YAML folders (macOS ships it) |
 | Time queries and actions | Node 22.5+ and a test user signed in and synced in the iOS Simulator |
-| Time screens | Maestro and Java 17+ (`curl -Ls https://get.maestro.mobile.dev \| bash`) |
+| Time screens | Maestro and Java 17+ (`brew install mobile-dev-inc/tap/maestro`, or `curl -Ls https://get.maestro.mobile.dev \| bash` when the script is allowed) |
 | Time on Android | Android SDK platform-tools (`adb`) and an emulator or a phone with USB debugging; for sync timing a **Google APIs** emulator image (not Google Play), which allows `adb root` |
-| Publish | SDK: the `jigx_debug` MCP server. YAML: Jigx Builder in VS Code |
+| Publish | SDK: the `jigx_debug` MCP server. YAML: `copy-to-test.py` makes a renamed copy, then Jigx Builder in VS Code publishes it |
 
 Claude checks these before timing and tells you what is missing.
 
@@ -151,6 +151,7 @@ YAML folder or an SDK `build/output.json`.
 | `pr-check.mjs` | the PR regression check against the target branch (CI: `ci/jigx-performance.yml`) |
 | `check-plans.py` | query plans: full scans, unused indexes, CI guards |
 | `time-queries.mjs` | every query, action and index build timed on a device database copy (`--scale 10`, `--baseline`) |
+| `copy-to-test.py` | a YAML solution copied to a test solution name, with the Builder organisation settings, for publishing |
 | `time-screens.py` | screen and cold-start times through Maestro, iOS or Android (`--platform`, `--compare`) |
 | `track-load.py` / `compare-runs.py` | live sync tracking in the iOS Simulator or an Android emulator (`--android`); before/after medians |
 | `profile-query.py` | one query at 1x and 10x data, before and after an index |

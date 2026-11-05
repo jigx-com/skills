@@ -68,7 +68,13 @@ def read(folder, *parts):
     if not os.path.exists(path):
         return None
     with open(path, encoding="utf-8") as f:
-        return json.load(f)
+        text = f.read()
+    try:
+        return json.loads(text) if text.strip() else None
+    except ValueError:
+        # A script that failed half way leaves an empty or partial file; report without it.
+        print(f"Skipped {path}: not valid JSON (did the script that writes it fail?)", file=sys.stderr)
+        return None
 
 
 def findings(static, plans):
@@ -140,7 +146,15 @@ def timing_lines(comparison, pre=None):
     if not comparison and pre:
         ready = med([r.get("first_start_to_ready_s") for r in pre])
         timeouts = sum(sum(r.get("snapshot_timeouts", {}).values()) for r in pre)
-        return [f"**Time to ready: {ready} s** (median of {len(pre)} run(s) on {pre[0].get('machine', '?')})", "",
+        busy = med([r.get("sync_busy_s") for r in pre])
+        starts = med([sum(r["scope_starts"].values()) for r in pre if "scope_starts" in r])
+        repeated = sorted({sid for r in pre for sid in r.get("repeated_scopes", [])})
+        lines = [f"**Time to ready: {ready} s** (median of {len(pre)} run(s) on {pre[0].get('machine', '?')})", ""]
+        if busy is not None:
+            lines += [f"Sync work, also after ready: {busy} s in {starts} scope start(s)."
+                      + (f" **{', '.join(repeated)} synced more than once in a run**: look for an onFocus or onLoad "
+                         "starting the same sync again." if repeated else ""), ""]
+        return lines + [
                 f"Timeout for first snapshot: {timeouts}. Runtime log errors: {sum(r.get('log_errors', 0) for r in pre)}. "
                 f"Expression errors: {sum(e['count'] for r in pre for e in r.get('expression_errors', []))}. "
                 f"Rows hashed for lack of an id: {sum(r.get('hash_fallbacks', 0) for r in pre)}."]
@@ -149,10 +163,16 @@ def timing_lines(comparison, pre=None):
     rows = comparison["rows"]
     total = rows[0]
     pct = "-" if total["change_pct"] is None else f"{total['change_pct']}%"
-    lines = [f"**Time to ready: {total['before_s']} s → {total['after_s']} s ({pct}, {total['verdict']})**", "",
+    lines = [f"**Time to ready: {total['before_s']} s → {total['after_s']} s ({pct}, {total['verdict']})**", ""]
+    for r in rows[1:3]:
+        if r["metric"].startswith("total:") and r["before_s"] is not None:
+            unit = "" if "count" in r["metric"] else " s"
+            lines += [f"{r['metric'][7:].capitalize()}: {r['before_s']}{unit} → {r['after_s']}{unit} "
+                      f"({'-' if r['change_pct'] is None else str(r['change_pct']) + '%'}, {r['verdict']})", ""]
+    lines += [
              f"Medians of {len(comparison['before_runs'])} runs before and {len(comparison['after_runs'])} after "
              f"on {'; '.join(comparison['machine'])}.", ""]
-    moved = [r for r in rows[1:] if r["change_pct"] is not None and r["verdict"] != "same"]
+    moved = [r for r in rows[1:] if not r["metric"].startswith("total:") and r["change_pct"] is not None and r["verdict"] != "same"]
     moved.sort(key=lambda r: r["change_pct"])
     if moved:
         lines += ["| Step | Before | After | Change |", "| --- | ---: | ---: | ---: |"]
@@ -221,6 +241,12 @@ def overview(folder, pre, post, timings_before, timings_after, screens, static_b
             b, a = med([r.get("first_start_to_ready_s") for r in p]), med([r.get("first_start_to_ready_s") for r in q]) if q else None
             top = sorted(((n, v) for n, v in entry_medians(p).items() if v is not None), key=lambda x: -x[1])[:1]
             rows.append((label, fmt_s(b), fmt_s(a), f"slowest function: {top[0][0]} {top[0][1]} s" if top else ""))
+            busy = med([r.get("sync_busy_s") for r in p])
+            if busy is not None:
+                repeated = sorted({sid for r in p for sid in r.get("repeated_scopes", [])})
+                rows.append((f"{label.split(',')[0]}, all sync work (also after ready)", fmt_s(busy),
+                             fmt_s(med([r.get("sync_busy_s") for r in q])) if q else "-",
+                             f"synced more than once: {', '.join(repeated)}" if repeated else ""))
     for kind, label in (("queries", "Queries"), ("actions", "Actions (execute-sql)")):
         if timings_before:
             tot = lambda t: round(sum(r.get("ms") or 0 for r in (t or {}).get(kind, [])), 1)

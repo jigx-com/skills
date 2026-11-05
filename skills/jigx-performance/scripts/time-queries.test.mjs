@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {collect, compareTimings, growth, paramNames, sampleQueries, scaleDatabase, sqlLiterals, timeSolution} from './time-queries.mjs';
+import {atScale, collect, compareTimings, growth, paramNames, sampleQueries, scaleDatabase, sqlLiterals, timeSolution} from './time-queries.mjs';
 
 const sqlite = await import('node:sqlite').catch(() => null);
 const ds = (query, extra = {}) => ({type: 'datasource.sqlite', options: {entities: ['orders'], query, rewriteQuery: false, ...extra}});
@@ -58,7 +58,7 @@ test('times queries on real rows, builds indexes, rolls back writes', {skip: !sq
 
 test('comparison flags only real moves, keyed by location', () => {
   const before = {queries: [{where: 'a', ms: 100}, {where: 'b', ms: 2}, {where: 'c', ms: 40}]};
-  const after = {queries: [{where: 'a', ms: 20}, {where: 'b', ms: 4}, {where: 'c', ms: 60}]};
+  const after = {queries: [{where: 'a', ms: 20}, {where: 'b', ms: 2.8}, {where: 'c', ms: 60}]};
   assert.deepEqual(compareTimings(before, after).map(r => [r.where, r.verdict]), [['a', 'faster'], ['c', 'SLOWER'], ['b', 'same']]);
 });
 
@@ -85,4 +85,12 @@ test('growth flags only items that grow faster than the data and real time', () 
   const big = {queries: [{where: 'a', ms: 10, rows: 100}, {where: 'b', ms: 300, rows: 100}, {where: 'c', ms: 50, rows: 1000}, {where: 'd', ms: 6, rows: 50}], actions: []};
   const v = Object.fromEntries(growth(base, big, 10).map(r => [r.where, r.verdict]));
   assert.deepEqual(v, {a: 'in line', b: 'GROWS FASTER', c: 'rows inflated', d: 'in line'});
+});
+
+test('a small query that gets much faster counts; sub-millisecond jitter does not; scaled runs compare too', () => {
+  const run = ms => ({queries: [{where: 'a', ms: ms[0]}, {where: 'b', ms: ms[1]}, {where: 'c', ms: ms[2]}]});
+  const v = compareTimings(run([2.5, 0.3, 40]), run([0.2, 0.8, 41])).reduce((o, r) => ({...o, [r.where]: r.verdict}), {});
+  assert.deepEqual(v, {a: 'faster', b: 'same', c: 'same'});
+  const g = ms => [{kind: 'queries', where: 'a', ms_1x: 1, ms_nx: ms}];
+  assert.equal(compareTimings(atScale(g(213)), atScale(g(2.1)))[0].verdict, 'faster');
 });

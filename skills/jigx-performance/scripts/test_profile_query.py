@@ -63,5 +63,18 @@ class ProfileQueryTest(unittest.TestCase):
         self.assertEqual(pq.param_names("SELECT '@nope' WHERE x=@yes AND y=$also"), ["also", "yes"])
 
 
+class ScaleTest(unittest.TestCase):
+    def test_scaling_keeps_each_copy_joined_to_its_own_rows(self):
+        conn = sqlite3.connect(":memory:")
+        conn.execute("CREATE TABLE h (id TEXT PRIMARY KEY, data TEXT)")
+        conn.execute("CREATE TABLE l (id TEXT PRIMARY KEY, data TEXT)")
+        conn.executemany("INSERT INTO h VALUES (?, ?)", [(f"h{i}", json.dumps({"Nbr": f"A{i}  ", "Status": "Open"})) for i in range(32)])
+        conn.executemany("INSERT INTO l VALUES (?, ?)", [(f"l{i}", json.dumps({"Nbr": f"A{i % 32}"})) for i in range(320)])
+        sql = ("SELECT count(*) FROM h JOIN l ON trim(json_extract(h.data, '$.Nbr')) = json_extract(l.data, '$.Nbr') "
+               "WHERE json_extract(h.data, '$.Status') = 'Open'")
+        pq.scale_tables(conn, ["h", "l"], 10, pq.sql_literals(sql))
+        self.assertEqual(conn.execute(sql).fetchone()[0], 3200)  # 10x, not 100x
+
+
 if __name__ == "__main__":
     unittest.main()

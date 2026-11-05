@@ -366,7 +366,7 @@ export const RULES = {
   'ddl-invalidates-datasources': {priority: 'high', section: 'B', fix: 'List a table nothing binds to (default/debug) in entities:, after gating every statement on its table existing.'},
   'filter-inside-map': {priority: 'high', section: 'D', fix: 'Key the view into a map once ($merge of $map) and look up by id inside the loop.'},
   'per-row-datasource-read': {priority: 'medium', section: 'C', fix: 'Resolve the datasource once in expressions: or the list data:, and read @ctx.current.item.* in the item.'},
-  'uncapped-search-list': {priority: 'medium', section: 'C', fix: 'Add a LIMIT (e.g. 200) and union a pinned arm for the current selection.'},
+  'uncapped-search-list': {priority: 'medium', section: 'C', fix: "Cap the search arm and union a pinned arm for the current selection, or a dropdown or lookup loses a selected row past the cap: `SELECT … WHERE @selectedId IS NOT NULL AND <key> = @selectedId UNION ALL SELECT * FROM (SELECT … WHERE <search> AND (@selectedId IS NULL OR <key> != @selectedId) ORDER BY <sort> LIMIT 200) ORDER BY <sort>` (query-shape-and-lists.md). A plain LIMIT is safe only for a list nothing selects from."},
   'unindexed-predicate': {priority: 'low', section: 'B', fix: 'If the table can grow, ship an expression index with exactly this text, then confirm with check-plans.py.'},
   'wrapped-predicate': {priority: 'low', section: 'B', fix: 'Filter on one indexable json_extract expression (store a normalised key if needed) and index it.'},
   'rewrite-query-shorthand': {priority: 'high', section: 'B', fix: "Write every '$.field' as json_extract(data, '$.field') (select list and WHERE), or remove rewriteQuery: false."},
@@ -390,7 +390,7 @@ export const RULES = {
   'heavy-expression': {priority: 'medium', section: 'D', fix: 'Filter once: bind the datasource rows to a variable ($rows := …) or move the counts into the SQL, then reuse the result.'},
   'solution-state-in-global-datasource': {priority: 'medium', section: 'D', fix: 'Pass the value from the screen instead; a global datasource re-runs for everyone whenever solution state changes (ST-02).'},
   'solution-state-in-handler': {priority: 'low', section: 'D', fix: 'Each write re-evaluates every expression that reads solution state; write only when the value changes, or keep it in jig state (ST-01).'},
-  'expression-may-throw': {priority: 'medium', section: 'D', fix: "Guard the value (tested guards in jigx jsonata-validation-formatting.md): `x ? $trim($string(x)) : ''` for a component value, COALESCE the column in the SQL, ISO 8601 dates from SQL (or a matching picture) before $toMillis, and a $type check before $match and $number. $exists does not guard null."},
+  'expression-may-throw': {priority: 'medium', section: 'D', fix: "Guard the value (tested guards in jigx jsonata-validation-formatting.md): `x ? $trim($string(x)) :''` for a component value (in YAML use a block value `|`, or no space after the colon: `: ` ends a plain value), COALESCE the column in the SQL, ISO 8601 dates from SQL (or a matching picture) before $toMillis, and a $type check before $match and $number. $exists does not guard null."},
   'script-console-log': {priority: 'medium', section: 'H', fix: 'Remove console.log from expression functions; each call writes to the device log.'},
   'simple-script-function': {priority: 'low', section: 'D', fix: 'Write it as a JSONata expression (built-ins like $formatNumber, $substringBefore, $boolean, object lookups); keep JavaScript for logic JSONata cannot express clearly.'},
   'unused-script-function': {priority: 'low', section: 'E', fix: 'Delete it; the script ships and loads with the solution.'},
@@ -570,6 +570,11 @@ export function checkPerformance(app, {stats = null, sources = {}} = {}) {
   }
 
   const indexed = new Set(indexes.flatMap(i => i.expressions));
+  const dropdownSources = new Set();
+  walk(app, node => {
+    if (node?.type === 'component.dropdown' && typeof node.options?.data === 'string')
+      for (const m of node.options.data.matchAll(/@ctx\.datasources\.([\w-]+)/g)) dropdownSources.add(m[1]);
+  });
   for (const {path, node} of datasources) {
     const query = node.options.query;
     // An index matters once a table can grow: low unless the device data shows 1000+ rows.
@@ -580,8 +585,11 @@ export function checkPerformance(app, {stats = null, sources = {}} = {}) {
     if (shorthand.length) add('rewrite-query-shorthand', `${path}.options.query`,
       `rewriteQuery: false, but ${[...new Set(shorthand)].join(', ')} is shorthand: the query returns the literal text, not the field.`, {severity: 'error'});
     if (node.options.rewriteQuery !== false) add('rewrite-query-on', `${path}.options`, 'rewriteQuery is on, so the query is rewritten before its first run.');
-    if (/\bLIKE\b/i.test(masked) && /'%'\s*\|\|/.test(stripComments(query)) && !/\bLIMIT\b/i.test(masked))
-      add('uncapped-search-list', `${path}.options.query`, "Contains-search (LIKE '%' || …) with no LIMIT scans, sorts and renders every row.");
+    if (/\bLIKE\b/i.test(masked) && /'%'\s*\|\|/.test(stripComments(query)) && !/\bLIMIT\b/i.test(masked)) {
+      const name = path.split('.').pop();
+      add('uncapped-search-list', `${path}.options.query`, "Contains-search (LIKE '%' || …) with no LIMIT scans, sorts and renders every row." +
+        (dropdownSources.has(name) ? ` It feeds a dropdown: a plain LIMIT would drop the selected row, so the fix needs the pinned arm.` : ''));
+    }
     for (const p of filterPredicates(query)) {
       if (p.like) continue; // a leading-wildcard LIKE cannot use an index anyway
       if (p.multiArm && p.wrapped) {
@@ -654,24 +662,33 @@ export function checkPerformance(app, {stats = null, sources = {}} = {}) {
     }
   });
 
-  // onFocus runs every time the screen is shown.
-  const syncs_ = (node, depth = 0, seen = new Set()) => {
-    let found = false;
+  // onFocus runs every time the screen is shown. Unguarded sync steps reached from it, through
+  // execute-action up to three levels: how many entities they sync and which actions they run.
+  const focusSyncs = (node, depth = 0, out = {entities: 0, actions: new Set()}) => {
     walk(node, v => {
-      if (found || !v || typeof v !== 'object') return false;
+      if (!v || typeof v !== 'object') return false;
       if (v.when !== undefined && v !== node) return false; // a guarded branch is fine
-      if (v.type === 'action.sync-entities') { found = true; return false; }
+      if (v.type === 'action.sync-entities') { out.entities += Math.max(1, asArray(v.options?.entities).length); return false; }
       const target = v.type === 'action.execute-action' && v.options?.action;
-      if (typeof target === 'string' && depth < 3 && !seen.has(target) && app.actions?.[target]) {
-        seen.add(target);
-        if (syncs_(app.actions[target].action ?? app.actions[target], depth + 1, seen)) found = true;
+      if (typeof target === 'string' && depth < 3 && !out.actions.has(target) && app.actions?.[target]) {
+        out.actions.add(target);
+        focusSyncs(app.actions[target].action ?? app.actions[target], depth + 1, out);
       }
     });
-    return found;
+    return out;
   };
-  for (const [name, jig] of Object.entries(app.jigs ?? {}))
-    if (jig?.onFocus && jig.onFocus.when === undefined && syncs_(jig.onFocus))
-      add('heavy-focus', `$.jigs.${name}.onFocus`, 'Opening the screen runs a sync every time, with no when: guard.');
+  // What the app's own start runs: a screen that runs it again on focus repeats the full sync.
+  const startActions = app.onLoad ? focusSyncs(app.onLoad).actions : new Set();
+  for (const [name, jig] of Object.entries(app.jigs ?? {})) {
+    if (!jig?.onFocus || jig.onFocus.when !== undefined) continue;
+    const f = focusSyncs(jig.onFocus);
+    if (!f.entities) continue;
+    const again = [...f.actions].filter(a => startActions.has(a));
+    const full = again.length > 0 || f.entities >= 5;
+    add('heavy-focus', `$.jigs.${name}.onFocus`, full
+      ? `Opening the screen runs a full sync every time (${f.entities} entities${again.length ? `, the same ${again.join(', ')} the app runs on start` : ''}), with no when: guard.`
+      : 'Opening the screen runs a sync every time, with no when: guard.', full ? {priority: 'high'} : {});
+  }
 
   // Expression scripts: JSONata for simple logic, JavaScript for what JSONata cannot express clearly.
   const allText = JSON.stringify({...app, scripts: undefined});
@@ -718,7 +735,9 @@ export function checkPerformance(app, {stats = null, sources = {}} = {}) {
   for (const s of syncs) {
     const st = stats?.[s.table];
     const once = code => !seen.has(`${code}:${s.table}`) && seen.add(`${code}:${s.table}`);
-    if (!isRead(s.table) && once('unread'))
+    // A sync of $top 0 or 1 only tests access (a permission check); stopping it breaks the check.
+    const probe = /\$top\\?["']?\s*[:=]\s*\\?["']?[01]\b/.test(s.entry.function ? entryText(s).all : '');
+    if (!isRead(s.table) && !probe && once('unread'))
       add('synced-table-unread', s.path, `${s.table} is synced${st ? ` (${size(st)})` : ''} but no datasource or SQL reads it.`);
     if (st && (st.bytes >= 5 * MB || st.rows >= 5000) && once('large'))
       add('large-synced-table', s.path, `${s.table} holds ${size(st)} on the device.`,

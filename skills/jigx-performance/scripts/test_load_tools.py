@@ -193,6 +193,11 @@ class CheckPlansTest(unittest.TestCase):
         self.assertEqual(after["indexes_unused"], ["idx_h_unused"])
         self.assertEqual([f["index"] for f in after["indexes_failed"]], ["idx_bad"])
 
+    def test_sqlite_master_lookup_does_not_crash(self):
+        exists = "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('header', 'queue')"
+        report = cp.check_plans(app(exists))
+        self.assertEqual(report["indexes_failed"][0]["index"], "idx_bad")
+
     def test_guard_reports_missing_query_and_alias_maps_to_table(self):
         report = cp.check_plans(app(OR_LOOKUP), guard={"nope": {"no_scan": ["header"]}})
         self.assertEqual(report["guard_failures"], ["nope: no query found"])
@@ -265,6 +270,26 @@ class EntryTimingTest(unittest.TestCase):
         self.assertEqual(e["sync/a"]["duration_s"], 19.0)
         self.assertEqual(e["sync/b"]["duration_s"], 0.5)  # waited 19 s, ran for at most one interval
         self.assertEqual(e["sync/b"]["start_s"], 20.0)
+
+
+class RepeatedSyncTest(unittest.TestCase):
+    def test_a_second_sync_after_ready_is_counted_as_work_and_warned(self):
+        # onLoad syncs 1-3 s, then a screen's onFocus syncs the same scope again 4-7 s.
+        st = lambda state, start, end: {"scopes": {"main": {"state": state, "startedAt": start, "syncedAt": end, "entries": {}}},
+                                        "queue": 0, "counts": {}}
+        samples = [{"t": 1, **st("syncing", 1000, None)}, {"t": 3, **st("synced", 1000, 3000)},
+                   {"t": 4, **st("syncing", 4000, 3000)}, {"t": 7, **st("synced", 4000, 7000)}]
+        s = tl.summarise("a", "x.db", samples, "ready", 0, 7000, [], samples[-1]["scopes"] and samples[-1], ["main"])
+        self.assertEqual(s["scope_starts"], {"main": 2})
+        self.assertEqual(s["repeated_scopes"], ["main"])
+        self.assertEqual(s["sync_busy_s"], 5.0)            # 2 s + 3 s, not the 6 s span
+        self.assertEqual(s["first_start_to_ready_s"], 6.0)  # from the first start, not the second
+        before = [dict(s, label=f"pre-{i}") for i in range(3)]
+        after = [dict(s, label=f"post-{i}", sync_busy_s=2.0, scope_starts={"main": 1}, repeated_scopes=[]) for i in range(3)]
+        report = cr.compare(before, after)
+        busy = next(r for r in report["rows"] if r["metric"].startswith("total: sync busy"))
+        self.assertEqual((busy["before_s"], busy["after_s"], busy["verdict"]), (5.0, 2.0, "improved"))
+        self.assertTrue(any("main synced more than once" in w for w in report["warnings"]))
 
 
 class AndroidReadTest(unittest.TestCase):

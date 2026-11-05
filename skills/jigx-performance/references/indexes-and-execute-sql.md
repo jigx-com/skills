@@ -113,9 +113,34 @@ these as `cte-join-no-index`.
   right now, and expose them under a `name` field, which is what the gate reads. It has to go to
   `sqlite_master` rather than `list_device_tables`, which omits the SDK system tables (see below).
 
+  List the tables the index step indexes as its `entities`: then it re-reads when a sync
+  creates one, and the gate sees the new table without a restart.
+
   ```yaml
-  when: ="default/growerVisitImages" in @ctx.datasources.local-tables.name
+  # datasources/local-tables.jigx
+  type: datasource.sqlite
+  options:
+    provider: DATA_PROVIDER_LOCAL
+    entities:              # the indexed tables: re-read when a sync creates one
+      - default/orders
+      - default/orderLines
+    query: |
+      SELECT name AS id, name FROM sqlite_master WHERE type = 'table'
   ```
+
+  ```yaml
+  # one gated step per table, in the index action
+  - type: action.execute-sql
+    when: ="default/orders" in @ctx.datasources.local-tables.name
+    options:
+      entities: [default/debug]   # a table nothing binds to: no datasource re-runs
+      statements:
+        - statement: |
+            CREATE INDEX IF NOT EXISTS idx_orders_nbr
+            ON [default/orders] (json_extract(data, '$.OrderNbr'))
+  ```
+
+  `check-plans.py` and the audit skip `sqlite_master` and other `sqlite_*` tables.
 
 - **Keep new statements in a separate step** from proven ones, so a failure cannot drop indexes that
   already work.

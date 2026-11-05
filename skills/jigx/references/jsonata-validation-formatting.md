@@ -30,6 +30,15 @@ checked with jsonata 1.8.9:
 Guards that work (each tested against undefined, `null`, a number, an object, `""`,
 typed text and both date formats):
 
+In a `.jigx` file a guard's `: ` (colon, space) ends a plain YAML value: `text: =v ? v : ''`
+fails with "Nested mappings are not allowed in compact mappings". Write it as a block value,
+or drop the space after the colon (`=v ? v :''`; JSONata does not need it):
+
+```yaml
+text: |
+  =$type(@ctx.current.item.note) = 'string' ? $trim(@ctx.current.item.note) : ''
+```
+
 - a component value: `$type(v) = 'string' ? $trim(v) : ''`, or `v ? $trim($string(v)) : ''`
   (the second turns a number into its text)
 - a SQL column: `COALESCE(json_extract(data, '$.x'), '')` in the query, or `v ? … : …`

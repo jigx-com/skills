@@ -3,7 +3,8 @@
 
 Standard library only. Reads <folder>/*-summary.json, groups runs by label prefix
 (default pre- and post-), and reports medians for the time from first scope start
-to ready, each scope, and each sync entry, with the change in percent. A slowdown
+to ready, the total sync work (also after ready) and the number of scope starts, each
+scope, and each sync entry, with the change in percent. A slowdown
 over --threshold percent (default 10) is flagged for investigation; it is a review
 threshold, not an SLA. A change smaller than --min-change seconds (default 0.5, two
 samples at track-load.py's 0.25 s interval) is reported as "same": entry times are
@@ -54,7 +55,9 @@ def change(before, after, threshold, min_change=0.5):
 
 def metrics(runs):
     """{metric: [value per run]} for total, each scope and each entry."""
-    out = {"total: first start to ready": [r.get("first_start_to_ready_s") for r in runs]}
+    out = {"total: first start to ready": [r.get("first_start_to_ready_s") for r in runs],
+           "total: sync busy (all sync work, also after ready)": [r.get("sync_busy_s") for r in runs],
+           "total: scope starts (count)": [sum(r["scope_starts"].values()) if "scope_starts" in r else None for r in runs]}
     for key, section in (("scope", "scopes"), ("entry", "entries")):
         names = sorted({n for r in runs for n in r.get(section, {})})
         for n in names:
@@ -76,6 +79,10 @@ def compare(before, after, threshold=10.0, min_change=0.5):
         bad = [r["label"] for r in runs if r.get("result") != "ready"]
         if bad:
             warnings.append(f"{side} runs not ready: {', '.join(bad)}")
+    for side, runs in (("before", before), ("after", after)):
+        repeated = sorted({sid for r in runs for sid in r.get("repeated_scopes", [])})
+        if repeated:
+            warnings.append(f"{side}: {', '.join(repeated)} synced more than once in a run")
     machines = {r.get("machine") for r in before + after}
     if len(machines) > 1:
         warnings.append("runs come from different machines: " + "; ".join(sorted(m or "?" for m in machines)))
@@ -137,7 +144,9 @@ def main(argv=None):
         f.write(md)
     print(md)
     total = report["rows"][0]
-    failed = total["verdict"] in ("REGRESSION", "missing") or any("not ready" in w for w in report["warnings"])
+    totals = [r for r in report["rows"] if r["metric"].startswith("total:")]
+    failed = (total["verdict"] in ("REGRESSION", "missing") or any(r["verdict"] == "REGRESSION" for r in totals)
+              or any("not ready" in w for w in report["warnings"]))
     return 1 if failed else 0
 
 

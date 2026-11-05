@@ -27,8 +27,10 @@ then the tap, then a wait for the ready element. Pick a ready element that only
 appears once the data is there (a row number, not the title). Maestro's own overhead is
 about 2.5–3 s for a static iOS screen on an M2 Pro and varies by ~300 ms; two runs of an
 identical build once differed by 11%. So a screen counts as faster or slower only when
-every run on one side beats every run on the other and the medians differ by 250 ms.
-Put a static screen in the spec as a control.
+every run on one side beats every run on the other and the medians differ by 250 ms,
+with at least 2 successful runs a side. Put a static screen in the spec as a control.
+Cold-start screens run after all the others, so no screen meets an app that is still
+starting.
 
 **Queries and actions.** `time-queries.mjs` copies the database with `VACUUM INTO`
 (read-only on the original), builds the shipped indexes on the copy, then times every
@@ -68,9 +70,15 @@ use.
 1. **Publish to a test solution only.** Never time against production or a working
    user's phone. Same simulator, fixture data, network and build settings for every run.
    - SDK solutions: `jigx_debug` `create_debug_session` with `publish: true`.
-   - YAML solutions: `create_debug_session` cannot build them. Copy the solution, set the
-     copy's `index.jigx` `name:` and `title:` to the test solution, and publish the copy
-     with Jigx Builder in VS Code. The customer checkout stays untouched.
+   - YAML solutions: `create_debug_session` cannot build them. Make a renamed copy and
+     publish that with Jigx Builder in VS Code; the customer checkout stays untouched:
+
+     ```sh
+     python3 <skill-directory>/scripts/copy-to-test.py <solution-folder> --name <test-solution> --out <new-folder>
+     ```
+
+     It sets the copy's `index.jigx` `name:` and `title:`, copies the nearest
+     `.vscode/settings.json`, and refuses the original solution's name.
    - Builder publishes to the organisation in `.vscode/settings.json`
      (`jigx.workspace.organizationId`); point `jigx_debug` at the same one
      (`select_debug_organization`), or it reports the solution as not found.
@@ -109,7 +117,8 @@ use.
    python3 <skill-directory>/scripts/compare-runs.py perf-runs --before pre --after post
    ```
 
-   It reports medians for first start to ready, each scope and each entry, flags any
+   It reports medians for first start to ready, the sync work (time any scope is syncing,
+   also after ready), the number of scope starts, each scope and each entry, flags any
    slowdown over 10% and 0.5 s (a review threshold, not an SLA; smaller steps are one or
    two samples of noise), and warns on fewer than three runs a side, runs that did not
    reach ready, or runs from different machines. It writes `comparison.md` for the PR.
@@ -118,6 +127,11 @@ use.
 
 ## Reading the result
 
+- **Sync work and scope starts catch a second sync.** A screen's `onFocus` that syncs
+  again after the sign-in sync leaves "first start to ready" unchanged, since the extra
+  sync comes after ready, but doubles the sync work and the starts. `track-load.py` warns
+  when a scope syncs more than once in a run. Use `--settle 15` (or more) on a sign-in so the
+  run lasts long enough to see the home screen's `onFocus` sync.
 - **First start to ready** is the user's wait. Scope durations use the runtime's own
   `lastStartedAt`/`lastSyncedAt`; entry times have the sampling interval's resolution.
 - **The waterfall shows waves.** Entries that should overlap but run one after another

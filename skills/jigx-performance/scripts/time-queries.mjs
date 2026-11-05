@@ -300,15 +300,24 @@ export function compareTimings(before, after) {
       const b = old.get(r.where);
       if (!b || b.ms == null || r.ms == null) continue;
       const change = b.ms ? round((r.ms - b.ms) / b.ms * 100) : null;
-      // Below 5 ms both sides are noise on a host; flag only real moves.
-      const verdict = Math.abs(r.ms - b.ms) < 5 ? 'same' : r.ms < b.ms ? 'faster' : change > 10 ? 'SLOWER' : 'same';
+      // A host repeats a small query within about a millisecond, so a move counts when it is
+      // 5 ms or more, or 1 ms or more and at least twice (2.5 -> 0.2 ms is faster, 0.3 -> 0.8 is noise).
+      const diff = Math.abs(r.ms - b.ms), ratio = Math.max(r.ms, b.ms) / Math.max(Math.min(r.ms, b.ms), 0.05);
+      const moved = diff >= 5 || (diff >= 1 && ratio >= 2);
+      const verdict = !moved ? 'same' : r.ms < b.ms ? 'faster' : change > 10 ? 'SLOWER' : 'same';
       rows.push({kind, where: r.where, before_ms: b.ms, after_ms: r.ms, change_pct: change, verdict});
     }
   }
   return rows.sort((a, b) => Math.abs(b.after_ms - b.before_ms) - Math.abs(a.after_ms - a.before_ms));
 }
 
-export function timingsReport({title, result, comparison, meta, growthRows, scale}) {
+// The Nx timings of a --scale run, in the shape compareTimings reads.
+export const atScale = growthRows => ({
+  queries: (growthRows ?? []).filter(r => r.kind === 'queries').map(r => ({where: r.where, ms: r.ms_nx})),
+  actions: (growthRows ?? []).filter(r => r.kind === 'actions').map(r => ({where: r.where, ms: r.ms_nx})),
+});
+
+export function timingsReport({title, result, comparison, comparisonScaled, meta, growthRows, scale}) {
   const lines = [`# Query and action timings: ${title}`, '',
     `Host: ${meta.host}, SQLite ${meta.sqlite}. Database: ${meta.db} (${meta.rows} rows in ${meta.tables} tables).`,
     `Median of ${meta.runs} runs after a warm-up. Host timings show relative cost; a phone is several times slower.`, ''];
@@ -316,9 +325,11 @@ export function timingsReport({title, result, comparison, meta, growthRows, scal
   const slow = result.queries.filter(q => q.ms >= SLOW_MS);
   lines.push(`**${result.queries.length} queries, ${total(result.queries)} ms in total; ${slow.length} at ${SLOW_MS} ms or more. ` +
     `${result.actions.length} execute-sql steps, ${total(result.actions)} ms. ${result.indexes.filter(i => i.ms != null).length} indexes built, ${total(result.indexes)} ms.**`, '');
-  if (comparison?.length) {
-    const moved = comparison.filter(r => r.verdict !== 'same');
-    lines.push('## Before and after', '', `${moved.filter(r => r.verdict === 'faster').length} faster, ${moved.filter(r => r.verdict === 'SLOWER').length} slower, ${comparison.length - moved.length} the same.`, '');
+  for (const [heading, rows] of [['Before and after', comparison], [`Before and after at ${scale}x data`, comparisonScaled]]) {
+    if (!rows?.length) continue;
+    const moved = rows.filter(r => r.verdict !== 'same');
+    lines.push(`## ${heading}`, '', `${moved.filter(r => r.verdict === 'faster').length} faster, ${moved.filter(r => r.verdict === 'SLOWER').length} slower, ${rows.length - moved.length} the same ` +
+      '(a move counts at 5 ms, or at 1 ms when the time at least halves or doubles).', '');
     if (moved.length) {
       lines.push('| What | Where | Before | After | Change |', '| --- | --- | ---: | ---: | ---: |');
       for (const r of moved.slice(0, 25)) lines.push(`| ${KIND[r.kind]} | \`${r.where}\` | ${r.before_ms} ms | ${r.after_ms} ms | ${r.change_pct ?? '-'}% ${r.verdict === 'SLOWER' ? '⚠' : ''} |`);
@@ -409,14 +420,21 @@ async function main() {
         growthRows = growth(result, scaledResult, scale);
         meta.scale = scale;
       }
-      const comparison = baselinePath ? compareTimings(JSON.parse(fs.readFileSync(baselinePath, 'utf8')), result) : null;
-      console.log(JSON.stringify({file, meta, ...result, ...(comparison && {comparison}), ...(growthRows && {growth: growthRows})}, null, 2));
+      const baseline = baselinePath ? JSON.parse(fs.readFileSync(baselinePath, 'utf8')) : null;
+      const comparison = baseline ? compareTimings(baseline, result) : null;
+      // Compare the scaled runs too, when both sides were scaled by the same factor.
+      if (baseline && growthRows && baseline.growth && baseline.meta?.scale !== scale)
+        console.error(`Not comparing at ${scale}x: the baseline was scaled ${baseline.meta?.scale ?? 1}x.`);
+      const comparisonScaled = baseline?.growth && growthRows && baseline.meta?.scale === scale
+        ? compareTimings(atScale(baseline.growth), atScale(growthRows)) : null;
+      console.log(JSON.stringify({file, meta, ...result, ...(comparison && {comparison}), ...(comparisonScaled && {comparisonScaled}),
+        ...(growthRows && {growth: growthRows})}, null, 2));
       if (reportPath) {
         const title = loaded.app.title ?? loaded.app.name ?? path.basename(path.resolve(file));
-        fs.writeFileSync(reportPath, timingsReport({title, result, comparison, meta, growthRows, scale}));
+        fs.writeFileSync(reportPath, timingsReport({title, result, comparison, comparisonScaled, meta, growthRows, scale}));
         console.error(`Report written to ${reportPath}.`);
       }
-      process.exitCode = comparison?.some(r => r.verdict === 'SLOWER') ? 1 : 0;
+      process.exitCode = [...(comparison ?? []), ...(comparisonScaled ?? [])].some(r => r.verdict === 'SLOWER') ? 1 : 0;
     } finally { fs.rmSync(dir, {recursive: true, force: true}); }
   } catch (error) { console.error(`Timing failed: ${error.message}`); process.exitCode = 2; }
 }

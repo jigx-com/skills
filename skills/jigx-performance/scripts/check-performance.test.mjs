@@ -44,6 +44,10 @@ test('flags wrapped multi-arm predicates, uncapped search and leading-wildcard L
   const search = "SELECT * FROM t WHERE (@search IS NULL OR json_extract(data,'$.name') LIKE '%' || @search || '%') ORDER BY 1";
   assert.deepEqual(codes({datasources: {a: ds(search)}}), ['uncapped-search-list']);
   assert.deepEqual(codes({datasources: {a: ds(search + ' LIMIT 100')}}), []);
+  const picked = checkPerformance({datasources: {a: ds(search)},
+    jigs: {j: {children: [{type: 'component.dropdown', instanceId: 'd', options: {data: '=@ctx.datasources.a'}}]}}}).findings;
+  assert.match(picked.find(f => f.code === 'uncapped-search-list').message, /feeds a dropdown/);
+  assert.match(picked.find(f => f.code === 'uncapped-search-list').fix, /@selectedId IS NOT NULL/);
 });
 
 test('execute-sql shape, invalidation, idempotence and gating', () => {
@@ -108,6 +112,11 @@ test('sync: unread tables, full pulls, missing $select, sized by device stats', 
   assert.deepEqual(codes(app), ['sync-full-pull', 'sync-full-pull', 'sync-no-select', 'synced-table-unread']);
   const unread = checkPerformance(app).findings.find(f => f.code === 'synced-table-unread');
   assert.match(unread.message, /^notes /);
+  // A $top 1 sync only tests access; nothing reads the table on purpose.
+  app.functions['get-permission'] = {method: 'GET', url: 'https://{u}Permission', parameters: {$top: {location: 'query', value: '1'}}};
+  app.actions.s.action.options.entities.push({entity: 'default/permissionOutput', function: 'get-permission'});
+  assert.ok(!checkPerformance(app).findings.some(f => /permissionOutput/.test(f.message) && f.code === 'synced-table-unread'));
+  app.actions.s.action.options.entities.pop();
   const stats = {orders: {rows: 30000, bytes: 90 * 1024 * 1024}, types: {rows: 1500, bytes: 1000}, notes: {rows: 5, bytes: 10}};
   const sized = checkPerformance(app, {stats}).findings;
   assert.equal(sized.find(f => f.code === 'large-synced-table').priority, 'high');
@@ -298,6 +307,10 @@ test('sync behaviour: handlers, double scheduling, sequential calls, file transf
     'table-change-hot-guard index › onTableChanged.1 medium',
     'table-change-unguarded index › onTableChanged.0 high',
   ]);
+  // The screen re-runs the sync the app runs on start: a full sync on every tab switch.
+  const focus = checkPerformance({...app, onLoad: run('load')}).findings.find(f => f.code === 'heavy-focus');
+  assert.equal(focus.priority, 'high');
+  assert.match(focus.message, /the same load the app runs on start/);
 });
 
 test('expressions: many datasource filters in one expression; solution state in a global datasource', () => {

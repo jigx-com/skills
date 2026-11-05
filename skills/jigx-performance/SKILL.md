@@ -61,7 +61,8 @@ Follow `references/customer-review.md`:
    solution to publish to, the sign-in sync and the 3–6 screens to time, and the test
    data.
 2. **Audit**: static scan and plan check into `perf-review/before/`.
-3. **Time the current solution** after publishing it to the test solution: sync
+3. **Time the current solution** after publishing it to the test solution (YAML:
+   `copy-to-test.py`, then Jigx Builder; SDK: `jigx_debug`): sync
    (`track-load.py`, three runs; `--android` on an Android emulator), every query and
    `execute-sql` action on the test user's synced database and at 10x its data
    (`time-queries.mjs --scale 10`), each function from the sync steps, and the
@@ -188,11 +189,13 @@ Follow `references/customer-review.md`:
   (`--report`), device sizing (`--db`), and a pre-PR gate (`--baseline`, `--fail-on`). Exits nonzero only on errors; most findings
   are warnings to investigate.
 - `scripts/profile-query.py` - standard-library profiler for an exported SQLite
-  database: counts, bytes, plan, timings, optional synthetic scale-up on a copy.
+  database: counts, bytes, plan, timings, optional synthetic scale-up on a copy (join keys
+  kept apart per copy, as in `time-queries.mjs`).
 - `scripts/check-plans.py` - query plans for every datasource and `execute-sql` read
   against the shipped indexes: full scans, indexes used and unused, CI guard file.
 - `scripts/track-load.py` - read-only live tracker of a sync or load in the iOS
-  Simulator or a rooted Android emulator (`--android`): scopes, entries, queue, row counts, slow-datasource log lines, waterfall.
+  Simulator or a rooted Android emulator (`--android`): scopes, entries, queue, row counts, slow-datasource log lines, waterfall,
+  total sync work also after ready, and a warning when a scope syncs twice in one run.
 - `scripts/time-queries.mjs` - every datasource query, `execute-sql` step (rolled back)
   and index build timed on a copy of a device database, parameters sampled from the
   data; `--scale 10` repeats it at ten times the data and lists what grows faster than
@@ -205,6 +208,9 @@ Follow `references/customer-review.md`:
   before and after, findings per section, changes applied, what was not verified.
 - `scripts/compare-runs.py` - medians and per-scope and per-entry change between
   before and after runs, with warnings for weak comparisons.
+- `scripts/copy-to-test.py` - a YAML solution copied under a test solution name (and
+  the Builder organisation settings) for publishing with Jigx Builder; refuses the
+  original's name.
 
 ## Guardrails
 

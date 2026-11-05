@@ -104,6 +104,14 @@ FROM [refreshRuns] WHERE id = @actionId
 
 Run the refresh from `onFocus` only when `shouldRefresh = 1`, the device is online and no
 earlier refresh error is unresolved; write `LastRunDateTime` with an upsert on success.
+
+**Write the guard's value before anything that fires the guarded `onFocus`.** Steps in an
+action list run in order, and navigating home (`go-to`, a tab switch) fires that screen's
+`onFocus` at once. A sign-in action that switches home and only then records the last
+sync time lets the home screen see no timestamp and sync everything a second time. Record
+the timestamp (or the "synced" flag) first, then navigate. The audit cannot see this order;
+a timed run shows it as a scope that starts twice (`track-load.py` warns, and
+`sync_busy_s` doubles while time to ready does not move).
 Make the interval configurable. Server push (`onTableChanged`) complements this; the
 interval catches what push missed while offline.
 

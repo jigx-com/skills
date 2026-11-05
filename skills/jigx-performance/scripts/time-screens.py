@@ -158,10 +158,11 @@ def summarise(results):
     return out
 
 
-def compare(before, after, min_ms=250):
-    """Per screen: medians before and after. Faster or SLOWER only when the runs do not overlap
-    (every after run beyond every before run) and the medians differ by min_ms; identical
-    builds measured twice differed by 11% (300 ms) in one calibration, so a median alone is noise."""
+def compare(before, after, min_ms=250, min_runs=2):
+    """Per screen: medians before and after. Faster or SLOWER only when each side has min_runs
+    successful runs, the runs do not overlap (every after run beyond every before run) and the
+    medians differ by min_ms; identical builds measured twice differed by 11% (300 ms) in one
+    calibration, so a median alone is noise, and one run is no median."""
     rows = []
     for name, a in after["screens"].items():
         b = before["screens"].get(name)
@@ -172,6 +173,10 @@ def compare(before, after, min_ms=250):
         change = round(delta / b["median_ms"] * 100, 1) if b["median_ms"] else None
         bs = [r["ms"] for r in b["runs"] if r["ms"] is not None]
         as_ = [r["ms"] for r in a["runs"] if r["ms"] is not None]
+        if min(len(bs), len(as_)) < min_runs:
+            rows.append({"screen": name, "before_ms": b["median_ms"], "after_ms": a["median_ms"], "change_pct": change,
+                         "verdict": f"not comparable ({len(bs)} and {len(as_)} successful runs)"})
+            continue
         apart = max(as_) < min(bs) if delta < 0 else min(as_) > max(bs)
         rows.append({"screen": name, "before_ms": b["median_ms"], "after_ms": a["median_ms"], "change_pct": change,
                      "verdict": ("faster" if delta < 0 else "SLOWER") if apart and abs(delta) >= min_ms else "same"})
@@ -189,8 +194,8 @@ def report(result, comparison=None):
             fmt = lambda v: "-" if v is None else f"{v / 1000:.2f} s"
             lines.append(f"| {r['screen']} | {fmt(r['before_ms'])} | {fmt(r['after_ms'])} | "
                          f"{'-' if r['change_pct'] is None else str(r['change_pct']) + '%'} | {r['verdict']} |")
-        lines += ["", "A change counts when every run on one side beats every run on the other and the medians differ by "
-                  "250 ms or more; anything less is Maestro and simulator noise.", ""]
+        lines += ["", "A change counts when each side has 2 or more successful runs, every run on one side beats every run "
+                  "on the other and the medians differ by 250 ms or more; anything less is Maestro and simulator noise.", ""]
     lines += ["## Medians", "", "| Screen | Median | Spread | Failed runs |", "| --- | ---: | ---: | ---: |"]
     for name, s in result["screens"].items():
         med = "-" if s["median_ms"] is None else f"{s['median_ms'] / 1000:.2f} s"
@@ -278,15 +283,21 @@ def main(argv=None):
         p.error(f"no --app-id, no appId in the spec, and not exactly one com.jigx.* app on the {plat} device")
     maestro = shutil.which("maestro") or os.path.expanduser("~/.maestro/bin/maestro")
     if not os.path.exists(maestro):
-        p.error("Maestro is not installed: curl -Ls https://get.maestro.mobile.dev | bash (needs Java 17+)")
+        p.error("Maestro is not installed: brew install mobile-dev-inc/tap/maestro, or "
+                "curl -Ls https://get.maestro.mobile.dev | bash (needs Java 17+)")
     print(f"Timing on {plat} ({args.device or 'the only device'}), app {app_id}", file=sys.stderr, flush=True)
     version = subprocess.run([maestro, "--version"], capture_output=True, text=True).stdout.strip().splitlines()[-1:] or ["?"]
     results = {s["name"]: [] for s in screens}
-    for i in range(args.runs):
-        for s in screens:
-            ms, err = run_once(app_id, s, maestro, args.device, plat)
-            results[s["name"]].append({"run": i + 1, "ms": ms, **({"error": err} if err else {})})
-            print(f"{s['name']} run {i + 1}: " + (f"{ms} ms" if ms is not None else f"failed ({err})"), file=sys.stderr, flush=True)
+    # Cold starts run after every other screen: a screen timed right after one meets an app
+    # that is still starting, and fails or reads slow.
+    warm = [s for s in screens if s.get("start") != "cold"]
+    cold = [s for s in screens if s.get("start") == "cold"]
+    for group in (warm, cold):
+        for i in range(args.runs):
+            for s in group:
+                ms, err = run_once(app_id, s, maestro, args.device, plat)
+                results[s["name"]].append({"run": i + 1, "ms": ms, **({"error": err} if err else {})})
+                print(f"{s['name']} run {i + 1}: " + (f"{ms} ms" if ms is not None else f"failed ({err})"), file=sys.stderr, flush=True)
     result = {"label": args.label, "appId": app_id, "maestro": version[0], "runs": args.runs, "platform": plat,
               "device": describe_device(plat, args.device),
               "recorded": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),

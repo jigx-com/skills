@@ -94,21 +94,87 @@ def time_query(conn, sql, params, runs):
             "runs": runs, "result_rows": len(result)}, result
 
 
-def scale_tables(conn, tables, factor):
-    """Multiply rows in each table by `factor`, suffixing an `id` column so keys stay unique."""
-    notes = []
-    for table in tables:
-        cols = [r[1] for r in conn.execute(f"PRAGMA table_info({qident(table)})")]
-        conn.execute(f"CREATE TEMP TABLE _seed AS SELECT * FROM {qident(table)}")
-        col_list = ", ".join(qident(c) for c in cols)
-        for k in range(1, factor):
-            select = ", ".join((f"{qident(c)} || '_x{k}'" if c.lower() == "id" else qident(c)) for c in cols)
+DATE_LIKE = re.compile(r"^\d{4}-\d{2}-\d{2}")
+
+
+def sql_literals(sql):
+    """String and number literals in the query: constants such as 'Open', never linking keys."""
+    out = {m.group(1).replace("''", "'").strip() for m in re.finditer(r"'((?:[^']|'')*)'", sql)}
+    out |= {str(float(m.group(0))).rstrip("0").rstrip(".") for m in re.finditer(r"(?<![\w.$@'])-?\d+(?:\.\d+)?(?![\w.])", masked(sql))}
+    return out
+
+
+def scale_tables(conn, tables, factor, literals=frozenset()):
+    """Multiply rows in each table by `factor`, keeping each copy's joins inside that copy.
+
+    A value found in two or more of the tables (not a literal of the query, not a date) is a
+    linking key: copy k gets it as "<value>_x<k>" (before trailing spaces, so trim() still
+    matches) or, for an integer, + k * 1e9, inside JSON too. `id` always changes. Without
+    this, every copy of a row joins every copy of its partner and a join returns factor²
+    rows. Same rules as scaleDatabase in time-queries.mjs."""
+    norm = lambda v: v.strip() if isinstance(v, str) else str(v)
+
+    def parse(v):
+        if isinstance(v, str) and v.lstrip()[:1] in ("{", "["):
             try:
-                conn.execute(f"INSERT INTO {qident(table)} ({col_list}) SELECT {select} FROM _seed")
-            except sqlite3.IntegrityError as error:
-                notes.append(f"{table}: stopped scaling at {k}x ({error})")
-                break
-        conn.execute("DROP TABLE _seed")
+                return json.loads(v)
+            except ValueError:
+                return None
+        return None
+
+    def leaves(v):
+        if isinstance(v, dict):
+            for x in v.values():
+                yield from leaves(x)
+        elif isinstance(v, list):
+            for x in v:
+                yield from leaves(x)
+        else:
+            yield v
+
+    data, seen = {}, {}
+    for table in tables:
+        cur = conn.execute(f"SELECT * FROM {qident(table)}")
+        cols = [d[0] for d in cur.description]
+        rows = cur.fetchall()
+        data[table] = (cols, rows)
+        for row in rows:
+            for c, v in zip(cols, row):
+                j = parse(v) if c != "id" else None
+                for x in (leaves(j) if j is not None else [v]):
+                    if x is None or isinstance(x, bool) or (isinstance(x, float) and not x.is_integer()):
+                        continue
+                    k = norm(x)
+                    if k and k not in literals and not DATE_LIKE.match(k):
+                        seen.setdefault(k, set()).add(table)
+    linking = {k for k, ts in seen.items() if len(ts) > 1}
+
+    def shift(v, k, force=False):
+        if v is None or isinstance(v, bool) or not (force or norm(v) in linking):
+            return v
+        if isinstance(v, (int, float)):
+            return v + k * 10**9 if float(v).is_integer() else v
+        return re.sub(r"(\s*)$", lambda m: f"_x{k}{m.group(1)}", str(v), count=1)
+
+    def remap(v, k):
+        if isinstance(v, dict):
+            return {a: remap(b, k) for a, b in v.items()}
+        if isinstance(v, list):
+            return [remap(x, k) for x in v]
+        return shift(v, k)
+
+    notes = [f"{len(linking)} linking key(s) kept apart per copy"]
+    for table, (cols, rows) in data.items():
+        if not rows:
+            continue
+        insert = f"INSERT INTO {qident(table)} ({', '.join(qident(c) for c in cols)}) VALUES ({', '.join('?' * len(cols))})"
+        try:
+            for k in range(1, factor):
+                conn.executemany(insert, [[shift(v, k, True) if c.lower() == "id"
+                                           else (json.dumps(remap(parse(v), k)) if parse(v) is not None else shift(v, k))
+                                           for c, v in zip(cols, row)] for row in rows])
+        except sqlite3.IntegrityError as error:
+            notes.append(f"{table}: stopped scaling at {k}x ({error})")
     conn.commit()
     return notes
 
@@ -140,7 +206,7 @@ def profile(db, sql, params=None, runs=5, scale=1, ddl=None, compare=None):
         shutil.copyfile(db, copy)
         conn = sqlite3.connect(copy)
         if scale > 1:
-            report["scale_notes"] = scale_tables(conn, tables_read(conn, sql), scale)
+            report["scale_notes"] = scale_tables(conn, tables_read(conn, sql), scale, sql_literals(sql))
         label = f"{scale}x" if scale > 1 else "1x"
         before, before_rows = measure(conn, sql, bind, runs, label)
         report["measurements"].append(before)

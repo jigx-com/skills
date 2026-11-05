@@ -119,6 +119,9 @@ def build_db(queries, indexes, schema_from=None):
     tables = {i["table"] for i in indexes}
     for q in queries:
         tables |= set(table_refs(q["sql"]).values()) - cte_names(q["sql"])
+    # SQLite's own tables (sqlite_master, read to test whether a local table exists) are
+    # built in and cannot be created.
+    tables = {t for t in tables if not t.lower().startswith("sqlite_")}
     for t in sorted(tables):
         if t in real:
             conn.execute(real[t])
