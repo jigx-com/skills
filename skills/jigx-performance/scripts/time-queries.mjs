@@ -7,7 +7,13 @@
 // rolled back. Host timings show relative cost on this machine, not device timings.
 //
 //   node time-queries.mjs <solution folder | build/output.json> --db device.db
-//     [--params params.json] [--runs 5] [--report timings.md] [--baseline before.json]
+//     [--params params.json] [--runs 5] [--report timings.md] [--baseline before.json] [--scale 10]
+//
+// --scale N also times everything on a second copy with every table's rows multiplied by N,
+// and lists what grows faster than the data (a scan per row, a join no index serves). Keys
+// that link tables (a value found in two or more tables, such as an appointment number) get
+// a per-copy suffix, so each copy joins to its own rows instead of multiplying the joins;
+// values the solution's SQL compares with literally ('In Process', 1) are kept.
 //
 // params.json binds query parameters by name ({"appointmentId": "AP001"}); unbound
 // parameters are NULL, which makes most filtered queries return nothing quickly.
@@ -130,6 +136,97 @@ export function collect(app) {
   return {queries: [...queries.values()], indexes, steps, built};
 }
 
+// Values the SQL names literally: kept as they are when scaling, so filters still match.
+export function sqlLiterals(sqls) {
+  const out = new Set();
+  for (const sql of sqls) {
+    for (const m of sql.matchAll(/'((?:[^']|'')*)'/g)) out.add(m[1].replace(/''/g, "'").trim());
+    for (const m of maskSql(sql).matchAll(/(?<![\w.$@])-?\d+(?:\.\d+)?(?![\w.])/g)) out.add(String(Number(m[0])));
+  }
+  return out;
+}
+
+const DATE_LIKE = /^\d{4}-\d{2}-\d{2}/;
+
+// Multiply every table's rows by `factor` in place. Linking keys get "_x<k>" (before any
+// trailing spaces, so trim() still matches) or, for integers, + k * 1e9; ids always change.
+export function scaleDatabase(db, factor, literals = new Set()) {
+  const q = name => `"${name.replace(/"/g, '""')}"`;
+  const tables = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '\\_%' ESCAPE '\\'").all().map(r => r.name);
+  const parse = v => { if (typeof v !== 'string' || !/^\s*[[{]/.test(v)) return undefined; try { return JSON.parse(v); } catch { return undefined; } };
+  const norm = v => typeof v === 'string' ? v.trim() : String(v);
+  // Pass 1: which tables each scalar value appears in.
+  const seen = new Map();
+  const note = (v, t) => {
+    if (typeof v === 'boolean' || v == null) return;
+    if (typeof v === 'number' && !Number.isInteger(v)) return;
+    const k = norm(v);
+    if (!k || literals.has(k) || DATE_LIKE.test(k)) return;
+    (seen.get(k) ?? seen.set(k, new Set()).get(k)).add(t);
+  };
+  const leaves = (v, fn) => { if (v && typeof v === 'object') { for (const x of Object.values(v)) leaves(x, fn); } else fn(v); };
+  const data = {};
+  for (const t of tables) {
+    const rows = db.prepare(`SELECT * FROM ${q(t)}`).all();
+    data[t] = rows;
+    for (const r of rows) for (const [c, v] of Object.entries(r)) {
+      if (c === 'id') { note(v, t); continue; }
+      const j = parse(v);
+      if (j !== undefined) leaves(j, x => note(x, t)); else note(v, t);
+    }
+  }
+  const linking = new Set([...seen].filter(([, ts]) => ts.size > 1).map(([k]) => k));
+  const shift = (v, k, force = false) => {
+    if ((force || linking.has(norm(v))) && v != null && typeof v !== 'boolean') {
+      if (typeof v === 'number') return Number.isInteger(v) ? v + k * 1e9 : v;
+      return String(v).replace(/(\s*)$/, `_x${k}$1`);
+    }
+    return v;
+  };
+  const remap = (v, k) => Array.isArray(v) ? v.map(x => remap(x, k))
+    : v && typeof v === 'object' ? Object.fromEntries(Object.entries(v).map(([a, b]) => [a, remap(b, k)])) : shift(v, k);
+  let added = 0;
+  db.exec('BEGIN');
+  try {
+    for (const t of tables) {
+      const rows = data[t];
+      if (!rows.length) continue;
+      const cols = Object.keys(rows[0]);
+      const insert = db.prepare(`INSERT INTO ${q(t)} (${cols.map(q).join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`);
+      for (let k = 1; k < factor; k++) for (const r of rows) {
+        insert.run(...cols.map(c => {
+          const v = r[c];
+          if (c === 'id') return shift(v, k, true);
+          const j = parse(v);
+          return j !== undefined ? JSON.stringify(remap(j, k)) : shift(v, k);
+        }));
+        added++;
+      }
+    }
+    db.exec('COMMIT');
+  } catch (e) { db.exec('ROLLBACK'); throw e; }
+  return {tables: tables.length, linkingKeys: linking.size, rowsAdded: added};
+}
+
+// Items whose time grows faster than the data between a 1x and an Nx run. An item whose rows
+// grew more than N times joins on a value the scaling could not separate: shown, not judged.
+export function growth(base, scaled, factor, {minMs = 10} = {}) {
+  const rows = [];
+  for (const kind of ['queries', 'actions']) {
+    const old = new Map((base[kind] ?? []).map(r => [r.where, r]));
+    for (const r of scaled[kind] ?? []) {
+      const b = old.get(r.where);
+      if (!b || b.ms == null || r.ms == null) continue;
+      const timeX = b.ms > 0 ? r.ms / b.ms : null;
+      const rowsX = b.rows ? r.rows / b.rows : null;
+      const inflated = rowsX != null && rowsX > factor * 1.5;
+      const verdict = inflated ? 'rows inflated' : r.ms >= minMs && timeX != null && timeX > factor * 2 ? 'GROWS FASTER' : 'in line';
+      rows.push({kind, where: r.where, ms_1x: b.ms, ms_nx: r.ms, time_x: timeX && round(timeX), rows_1x: b.rows, rows_nx: r.rows, verdict});
+    }
+  }
+  return rows.sort((a, b) => (b.verdict === 'GROWS FASTER') - (a.verdict === 'GROWS FASTER') || b.ms_nx - a.ms_nx);
+}
+
 const median = xs => { const s = [...xs].sort((a, b) => a - b); return s.length ? s[Math.floor((s.length - 1) / 2)] : null; };
 const round = ms => Math.round(ms * 10) / 10;
 
@@ -211,7 +308,7 @@ export function compareTimings(before, after) {
   return rows.sort((a, b) => Math.abs(b.after_ms - b.before_ms) - Math.abs(a.after_ms - a.before_ms));
 }
 
-export function timingsReport({title, result, comparison, meta}) {
+export function timingsReport({title, result, comparison, meta, growthRows, scale}) {
   const lines = [`# Query and action timings: ${title}`, '',
     `Host: ${meta.host}, SQLite ${meta.sqlite}. Database: ${meta.db} (${meta.rows} rows in ${meta.tables} tables).`,
     `Median of ${meta.runs} runs after a warm-up. Host timings show relative cost; a phone is several times slower.`, ''];
@@ -227,6 +324,18 @@ export function timingsReport({title, result, comparison, meta}) {
       for (const r of moved.slice(0, 25)) lines.push(`| ${KIND[r.kind]} | \`${r.where}\` | ${r.before_ms} ms | ${r.after_ms} ms | ${r.change_pct ?? '-'}% ${r.verdict === 'SLOWER' ? '⚠' : ''} |`);
       lines.push('');
     }
+  }
+  if (growthRows) {
+    const faster = growthRows.filter(r => r.verdict === 'GROWS FASTER');
+    lines.push(`## Growth at ${scale}x data`, '', `Every table's rows multiplied by ${scale} (${scale > 1 ? `${meta.scaled.linkingKeys} linking keys kept apart per copy` : ''}). ` +
+      `${faster.length} item(s) grow faster than the data (more than ${scale * 2}x the time, at ${scale}x data).`, '');
+    const shown = growthRows.filter(r => r.verdict !== 'in line').slice(0, 20);
+    if (shown.length) {
+      lines.push('| What | Where | 1x | ' + scale + 'x | Time | Rows | |', '| --- | --- | ---: | ---: | ---: | ---: | --- |');
+      for (const r of shown) lines.push(`| ${KIND[r.kind]} | \`${r.where}\` | ${r.ms_1x} ms | ${r.ms_nx} ms | ${r.time_x ?? '-'}x | ${r.rows_1x ?? '-'} → ${r.rows_nx ?? '-'} | ${r.verdict === 'GROWS FASTER' ? '⚠ grows faster' : 'rows inflated: a join key the scaling could not separate'} |`);
+      lines.push('');
+    }
+    lines.push('Read the query plan of each item that grows faster (`profile-query.py`) before changing it.', '');
   }
   const table = (heading, rows, cols) => {
     if (!rows.length) return;
@@ -262,7 +371,7 @@ async function main() {
     const args = process.argv.slice(2);
     const opt = name => { const i = args.indexOf(name); return i >= 0 ? args.splice(i, 2)[1] : undefined; };
     const dbPath = opt('--db'), reportPath = opt('--report'), paramsPath = opt('--params'), baselinePath = opt('--baseline');
-    const runs = Number(opt('--runs') ?? 5);
+    const runs = Number(opt('--runs') ?? 5), scale = Number(opt('--scale') ?? 1);
     const file = args[0] || 'build/output.json';
     if (!dbPath) throw new Error('--db <device database> is required (track-load.py --list finds simulator databases)');
     const loaded = fs.statSync(file).isDirectory()
@@ -284,11 +393,27 @@ async function main() {
       const meta = {host: `${os.type()} ${os.arch()}, ${os.cpus()[0]?.model ?? 'unknown CPU'}`, sqlite: db.prepare('SELECT sqlite_version() AS v').get().v,
         db: path.basename(dbPath), tables: tables.length, rows, runs, params: Object.keys(params)};
       db.close();
+      let growthRows = null;
+      if (scale > 1) {
+        // A second copy, scaled; the 1x copy above already holds the shipped indexes, so start from it.
+        const big = path.join(dir, 'scaled.db');
+        const one = new DatabaseSync(copy, {readOnly: true});
+        one.exec(`VACUUM INTO '${big.replace(/'/g, "''")}'`);
+        one.close();
+        const sdb = new DatabaseSync(big, {enableDoubleQuotedStringLiterals: true});
+        const {queries, steps} = collect(loaded.app);
+        meta.scaled = scaleDatabase(sdb, scale, sqlLiterals([...queries.map(x => x.sql), ...steps.flatMap(x => x.statements)]));
+        sdb.exec('ANALYZE');
+        const scaledResult = timeSolution(loaded.app, sdb, {params, runs, sources: loaded.sources});
+        sdb.close();
+        growthRows = growth(result, scaledResult, scale);
+        meta.scale = scale;
+      }
       const comparison = baselinePath ? compareTimings(JSON.parse(fs.readFileSync(baselinePath, 'utf8')), result) : null;
-      console.log(JSON.stringify({file, meta, ...result, ...(comparison && {comparison})}, null, 2));
+      console.log(JSON.stringify({file, meta, ...result, ...(comparison && {comparison}), ...(growthRows && {growth: growthRows})}, null, 2));
       if (reportPath) {
         const title = loaded.app.title ?? loaded.app.name ?? path.basename(path.resolve(file));
-        fs.writeFileSync(reportPath, timingsReport({title, result, comparison, meta}));
+        fs.writeFileSync(reportPath, timingsReport({title, result, comparison, meta, growthRows, scale}));
         console.error(`Report written to ${reportPath}.`);
       }
       process.exitCode = comparison?.some(r => r.verdict === 'SLOWER') ? 1 : 0;

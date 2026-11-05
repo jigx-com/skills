@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {spawnSync} from 'node:child_process';
-import {checkPerformance, filterPredicates, parseCreateIndex, normaliseExpr, loadSolution, markdownReport, newFindings, orAcrossKeys, orderByTerms, outerColumns, riskyCalls, scriptFunctions, sdkSources, shorthandPaths, where} from './check-performance.mjs';
+import {checkPerformance, cteJoins, filterPredicates, parseCreateIndex, normaliseExpr, loadSolution, markdownReport, newFindings, orAcrossKeys, orderByTerms, outerColumns, riskyCalls, scriptFunctions, sdkSources, shorthandPaths, where} from './check-performance.mjs';
 
 // Fixtures are minimal (no id, rewriteQuery on, loose entities); those checks have their own tests.
 const NOISE = new Set(['unused-datasource', 'rewrite-query-on', 'datasource-no-id', 'watched-table-unread', 'order-by-unindexed']);
@@ -363,4 +363,18 @@ function helper() { return 1 }
     'simple-script-function scripts/expressions/util.js › label low',
     'unused-script-function scripts/expressions/util.js › unused low',
   ]);
+});
+
+test('a join on columns a CTE computes from one table is found; direct joins and aggregates are not', () => {
+  const q = `WITH loc AS (SELECT json_extract(data, '$.AccountID') AS AccountID, trim(json_extract(data, '$.CD')) AS CD FROM locations),
+    cust AS (SELECT trim(id) AS sid, data FROM customers),
+    agg AS (SELECT json_extract(data, '$.Nbr') AS Nbr, count(*) AS n FROM lines GROUP BY 1)
+    SELECT o.id FROM opportunities o
+    LEFT JOIN cust AS c ON c.sid = @customer
+    LEFT JOIN loc l ON l.AccountID = json_extract(o.data, '$.AccountID') AND l.CD = 'X'
+    LEFT JOIN agg a ON a.Nbr = o.id
+    LEFT JOIN locations AS direct ON json_extract(direct.data, '$.AccountID') = 1`;
+  assert.deepEqual(cteJoins(q).map(c => `${c.cte}:${c.columns.join('+')}:${c.table}`), ['cust:sid:customers', 'loc:accountid+cd:locations']);
+  const app = {datasources: {opps: {type: 'datasource.sqlite', options: {entities: ['opportunities'], query: q}}}};
+  assert.ok(checkPerformance(app).findings.some(f => f.code === 'cte-join-no-index'));
 });

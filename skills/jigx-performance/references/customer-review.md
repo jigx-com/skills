@@ -53,7 +53,8 @@ simulator, user and data for every run, before and after.
 | Area | Tool | Output |
 | --- | --- | --- |
 | Sync: time to ready, each scope and step, queue, timeouts | `track-load.py`, three runs (`pre-1..3`; on Android `--android`, labels `pre-android-1..3`) | `perf-review/runs/` |
-| Queries: every datasource query on the device's real data | `time-queries.mjs` | `perf-review/before/timings.{json,md}` |
+| Queries: every datasource query on the device's real data, and at 10x data (`--scale 10`: what grows faster than the data) | `time-queries.mjs` | `perf-review/before/timings.{json,md}` |
+| Functions: every sync step's call and write | `track-load.py` (same runs as the sync) | `perf-review/runs/` |
 | Actions: every `execute-sql` step (rolled back) and index build | `time-queries.mjs` (same run) | the same files |
 | Screens and cold start: to the ready element, including datasources, expressions and rendering | `time-screens.py`, three runs a screen, per platform | `perf-review/screens/pre.{json,md}`, `pre-android.{json,md}` |
 | Expressions | no runtime timing exists; measured inside screen time, located by the audit (`per-row-datasource-read`, `filter-inside-map`) | — |
@@ -62,7 +63,7 @@ simulator, user and data for every run, before and after.
 python3 <skill-directory>/scripts/track-load.py --solution <test-solution> --wait --out perf-review/runs --label pre-1 --scopes <scopes>
 # after the sync: the database the timings run on
 python3 <skill-directory>/scripts/track-load.py --list
-node <skill-directory>/scripts/time-queries.mjs <solution> --db <test-solution database> \
+node <skill-directory>/scripts/time-queries.mjs <solution> --db <test-solution database> --scale 10 \
   --report perf-review/before/timings.md > perf-review/before/timings.json
 python3 <skill-directory>/scripts/time-screens.py perf-review/screens.json --label pre --out perf-review/screens
 # Android, same spec
@@ -73,7 +74,10 @@ python3 <skill-directory>/scripts/time-screens.py perf-review/screens.json --pla
 - **Sync**: arm the tracker, then sign in; repeat for `pre-2`, `pre-3`. Drive the
   simulator if a UI tool is available, otherwise ask the user to sign in while it runs.
 - **Queries and actions** run on a copy of the test user's database after the sync, so
-  they see real row counts. Parameters are sampled from the data; pass
+  they see real row counts. `--scale 10` repeats every timing on a copy with ten times
+  the rows (keys that link tables kept apart per copy) and lists what grows faster than
+  the data: a test user's small data set hides those, and they are the ones that get slow
+  for a big customer. Read each one's plan with `profile-query.py` before proposing a fix. Parameters are sampled from the data; pass
   `--params params.json` for the ids the key screens open with. A phone is several
   times slower than the host: rank by these numbers, do not quote them as device time.
 - **Screens**: write `perf-review/screens.json` once (format in `time-screens.py`):
@@ -133,7 +137,7 @@ mkdir -p perf-review/after
 node <skill-directory>/scripts/check-performance.mjs <solution> --report perf-review/after/audit.md > perf-review/after/static.json
 python3 <skill-directory>/scripts/check-plans.py <solution> > perf-review/after/plans.json
 python3 <skill-directory>/scripts/track-load.py --solution <test-solution> --wait --out perf-review/runs --label post-1 --scopes <scopes>
-node <skill-directory>/scripts/time-queries.mjs <solution> --db <test-solution database> \
+node <skill-directory>/scripts/time-queries.mjs <solution> --db <test-solution database> --scale 10 \
   --baseline perf-review/before/timings.json --report perf-review/after/timings.md > perf-review/after/timings.json
 python3 <skill-directory>/scripts/time-screens.py perf-review/screens.json --label post --out perf-review/screens --compare pre
 python3 <skill-directory>/scripts/time-screens.py perf-review/screens.json --platform android --label post-android --out perf-review/screens --compare pre-android

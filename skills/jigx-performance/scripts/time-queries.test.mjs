@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {collect, compareTimings, paramNames, sampleQueries, timeSolution} from './time-queries.mjs';
+import {collect, compareTimings, growth, paramNames, sampleQueries, scaleDatabase, sqlLiterals, timeSolution} from './time-queries.mjs';
 
 const sqlite = await import('node:sqlite').catch(() => null);
 const ds = (query, extra = {}) => ({type: 'datasource.sqlite', options: {entities: ['orders'], query, rewriteQuery: false, ...extra}});
@@ -60,4 +60,29 @@ test('comparison flags only real moves, keyed by location', () => {
   const before = {queries: [{where: 'a', ms: 100}, {where: 'b', ms: 2}, {where: 'c', ms: 40}]};
   const after = {queries: [{where: 'a', ms: 20}, {where: 'b', ms: 4}, {where: 'c', ms: 60}]};
   assert.deepEqual(compareTimings(before, after).map(r => [r.where, r.verdict]), [['a', 'faster'], ['c', 'SLOWER'], ['b', 'same']]);
+});
+
+test('scaling keeps linking keys apart per copy and leaves literal values alone', {skip: !sqlite && 'node:sqlite not available'}, () => {
+  const db = new sqlite.DatabaseSync(':memory:');
+  db.exec(`CREATE TABLE orders (id TEXT PRIMARY KEY, data TEXT); CREATE TABLE lines (id TEXT PRIMARY KEY, data TEXT);
+    INSERT INTO orders VALUES ('O1  ', '{"Nbr": "N1", "Status": "Open", "Account": 7}'), ('O2', '{"Nbr": "N2", "Status": "Open", "Account": 8}');
+    INSERT INTO lines VALUES ('L1', '{"Nbr": "N1", "Status": "Open", "Account": 7, "Order": "O1"}'), ('L2', '{"Nbr": "N2", "Status": "Open", "Order": "O2"}')`);
+  const literals = sqlLiterals(["SELECT * FROM orders WHERE json_extract(data, '$.Status') = 'Open' AND x = 1"]);
+  assert.ok(literals.has('Open') && literals.has('1'));
+  const info = scaleDatabase(db, 3, literals);
+  assert.equal(info.rowsAdded, 8);
+  const join = "SELECT count(*) AS n FROM orders o JOIN lines l ON json_extract(l.data, '$.Nbr') = json_extract(o.data, '$.Nbr')";
+  assert.equal(db.prepare(join).get().n, 6); // 2 per copy, not 2 x 9
+  assert.equal(db.prepare("SELECT count(*) AS n FROM orders WHERE json_extract(data, '$.Status') = 'Open'").get().n, 6);
+  assert.equal(db.prepare("SELECT count(*) AS n FROM orders o JOIN lines l ON json_extract(l.data, '$.Order') = trim(o.id)").get().n, 6);
+  // 7 links two tables and moves per copy; 8 is in one table only and stays.
+  assert.equal(db.prepare("SELECT json_extract(data, '$.Account') AS a FROM orders WHERE trim(id) = 'O1_x2'").get().a, 2e9 + 7);
+  assert.equal(db.prepare("SELECT json_extract(data, '$.Account') AS a FROM orders WHERE id = 'O2_x2'").get().a, 8);
+});
+
+test('growth flags only items that grow faster than the data and real time', () => {
+  const base = {queries: [{where: 'a', ms: 1, rows: 10}, {where: 'b', ms: 5, rows: 10}, {where: 'c', ms: 2, rows: 10}, {where: 'd', ms: 0.3, rows: 5}], actions: []};
+  const big = {queries: [{where: 'a', ms: 10, rows: 100}, {where: 'b', ms: 300, rows: 100}, {where: 'c', ms: 50, rows: 1000}, {where: 'd', ms: 6, rows: 50}], actions: []};
+  const v = Object.fromEntries(growth(base, big, 10).map(r => [r.where, r.verdict]));
+  assert.deepEqual(v, {a: 'in line', b: 'GROWS FASTER', c: 'rows inflated', d: 'in line'});
 });

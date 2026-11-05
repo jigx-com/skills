@@ -69,6 +69,27 @@ Prefer an index to a rewrite, and ship it so a failure cannot go unnoticed. `scr
   confirm with `--schema-from` an exported database and the device's real query before
   dropping one. Every unused index still costs every write.
 
+### Joins through a CTE column use no index
+
+A CTE that computes columns from one table (`locations_cte AS (SELECT
+json_extract(data, '$.BAccountID') AS BAccountID, … FROM locations)`) and is then joined
+on those columns gets no index lookup, even with an expression index that matches
+character for character: the plan says `SCAN locations USING INDEX …` (every row, for
+every outer row), not `SEARCH`. Join the table itself and write the expressions in the
+`ON` clause:
+
+```sql
+LEFT JOIN locations AS loc
+  ON json_extract(loc.data, '$.BAccountID') = json_extract(cust.data, '$.AccountID')
+  AND trim(json_extract(loc.data, '$.LocationCD')) = trim(json_extract(opp.data, '$.Location.value'))
+```
+
+Measured on an opportunity list: the plan went from two `SCAN`s per opportunity to two
+`SEARCH`es, 2.1 ms to 0.93 ms on 200 locations, identical results; the original grows
+with opportunities × (customers + locations). A CTE with `DISTINCT`, `GROUP BY` or a
+join is built once with its own automatic index and is not affected. The audit reports
+these as `cte-join-no-index`.
+
 ## `action.execute-sql`
 
 - **`entities:` must be a non-empty array.** Omit it and the action fails on shape before a single

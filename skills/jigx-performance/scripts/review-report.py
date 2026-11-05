@@ -16,7 +16,8 @@ Standard library only. Reads a review folder laid out as:
                                 the same on Android (optional)
   <folder>/changes.json         [{"section": "B", "change": "...", "files": [...]}] (optional)
 
-and writes <folder>/report.md (and prints it): sync, query, action and screen times
+and writes <folder>/report.md (and prints it): an overview of every area, then sync,
+function (sync step), query, action and screen times
 before and after, findings per section A-H before and after, the changes applied per
 section, and what was not measured. With only the before files it writes the overview used for the proposal.
 Read references/customer-review.md.
@@ -25,8 +26,11 @@ Example:
   python3 review-report.py perf-review --solution my-solution
 """
 import argparse
+import glob
 import json
 import os
+import re
+import statistics
 import sys
 
 SECTIONS = {
@@ -84,7 +88,50 @@ def section_rows(before, after):
     return rows
 
 
-def timing_lines(comparison):
+def load_runs(folder, prefix):
+    """track-load.py summaries labelled <prefix> or <prefix>-<n> in <folder>/runs."""
+    label = re.compile(rf"{re.escape(prefix)}(?:-\d+)?-summary\.json")
+    out = []
+    for path in sorted(glob.glob(os.path.join(folder, "runs", f"{prefix}*-summary.json"))):
+        if label.fullmatch(os.path.basename(path)):
+            with open(path, encoding="utf-8") as f:
+                out.append(json.load(f))
+    return out
+
+
+def med(values):
+    values = [v for v in values if v is not None]
+    return round(statistics.median(values), 2) if values else None
+
+
+def entry_medians(runs):
+    names = {n for r in runs for n in r.get("entries", {})}
+    return {n: med([r["entries"].get(n, {}).get("duration_s") for r in runs]) for n in names}
+
+
+def function_lines(pre, post):
+    """Each sync step runs one function (REST or OData call plus the write to the local table)."""
+    if not pre:
+        return ["Not measured. Run track-load.py for the sign-in sync (references/run-and-track.md)."]
+    before, after = entry_medians(pre), entry_medians(post) if post else {}
+    rows = sorted(((n, v) for n, v in before.items() if v is not None), key=lambda x: -x[1])[:12]
+    lines = (["| Function (sync step) | Before | After |", "| --- | ---: | ---: |"] if post
+             else ["| Function (sync step) | Median |", "| --- | ---: |"])
+    for n, v in rows:
+        lines.append(f"| {n} | {v} s | {after.get(n, '-')} s |" if post else f"| {n} | {v} s |")
+    return lines + ["", f"Median of {len(pre)} run(s){f' before and {len(post)} after' if post else ''}; a step's time is "
+                        "its call and the write of its rows, with the sampling interval's resolution. Calls outside sync "
+                        "(create, update, submit) are timed as screen journeys: tap the button, ready = the confirmation."]
+
+
+def timing_lines(comparison, pre=None):
+    if not comparison and pre:
+        ready = med([r.get("first_start_to_ready_s") for r in pre])
+        timeouts = sum(sum(r.get("snapshot_timeouts", {}).values()) for r in pre)
+        return [f"**Time to ready: {ready} s** (median of {len(pre)} run(s) on {pre[0].get('machine', '?')})", "",
+                f"Timeout for first snapshot: {timeouts}. Runtime log errors: {sum(r.get('log_errors', 0) for r in pre)}. "
+                f"Expression errors: {sum(e['count'] for r in pre for e in r.get('expression_errors', []))}. "
+                f"Rows hashed for lack of an id: {sum(r.get('hash_fallbacks', 0) for r in pre)}."]
     if not comparison:
         return ["Not measured. Run track-load.py and compare-runs.py (references/run-and-track.md)."]
     rows = comparison["rows"]
@@ -139,7 +186,53 @@ def query_lines(before, after):
         body = [f"| {KIND[r['kind']]} | `{r['where']}` | {r['ms']} ms | {r.get('rows', '-')} |" for r in rows]
     if rows:
         lines += ["", head, "| --- | --- | ---: | ---: |" + (" ---: |" if after else "")] + body
+    grow = [r for r in before.get("growth", []) if r["verdict"] == "GROWS FASTER"]
+    if before.get("growth"):
+        lines += ["", f"**At {meta.get('scale', 10)}x data: {len(grow)} grow faster than the data.**"]
+        if grow:
+            lines += ["", "| What | Where | 1x | Scaled | Time |", "| --- | --- | ---: | ---: | ---: |"]
+            lines += [f"| {KIND[r['kind']]} | `{r['where']}` | {r['ms_1x']} ms | {r['ms_nx']} ms | {r.get('time_x')}x |" for r in grow[:10]]
     return lines
+
+
+def slowest(timings, kind):
+    rows = [r for r in (timings or {}).get(kind, []) if r.get("ms") is not None]
+    return max(rows, key=lambda r: r["ms"]) if rows else None
+
+
+def overview(folder, pre, post, timings_before, timings_after, screens, static_before, static_after):
+    """One row per area: the number that matters before, after, and where to look."""
+    fmt_s = lambda v: "-" if v is None else f"{v} s"
+    rows = []
+    for label, p, q in (("Sync, time to ready", pre, post), ("Sync on Android", load_runs(folder, "pre-android"), load_runs(folder, "post-android"))):
+        if p:
+            b, a = med([r.get("first_start_to_ready_s") for r in p]), med([r.get("first_start_to_ready_s") for r in q]) if q else None
+            top = sorted(((n, v) for n, v in entry_medians(p).items() if v is not None), key=lambda x: -x[1])[:1]
+            rows.append((label, fmt_s(b), fmt_s(a), f"slowest function: {top[0][0]} {top[0][1]} s" if top else ""))
+    for kind, label in (("queries", "Queries"), ("actions", "Actions (execute-sql)")):
+        if timings_before:
+            tot = lambda t: round(sum(r.get("ms") or 0 for r in (t or {}).get(kind, [])), 1)
+            top = slowest(timings_before, kind)
+            grow = sum(1 for r in timings_before.get("growth", []) if r["kind"] == kind and r["verdict"] == "GROWS FASTER")
+            rows.append((f"{label}, {len(timings_before.get(kind, []))} in total", f"{tot(timings_before)} ms",
+                         f"{tot(timings_after)} ms" if timings_after else "-",
+                         (f"slowest: `{top['where']}` {top['ms']} ms" if top else "") + (f"; {grow} grow faster than the data" if grow else "")))
+    for label, (p, q) in screens.items():
+        if p:
+            for name, s in p["screens"].items():
+                after = q["screens"].get(name, {}).get("median_ms") if q else None
+                rows.append((f"{label}: {name}", "-" if s["median_ms"] is None else f"{s['median_ms'] / 1000:.2f} s",
+                             "-" if after is None else f"{after / 1000:.2f} s", ""))
+    if static_before:
+        pri = static_before.get("byPriority", {})
+        pa = (static_after or {}).get("byPriority")
+        rows.append(("Audit findings", f"{pri.get('high', 0)} high · {pri.get('medium', 0)} medium",
+                     f"{pa['high']} high · {pa['medium']} medium" if pa else "-", "by section below; fixes in audit.md"))
+    if not rows:
+        return []
+    return (["## Overview", "", "| Area | Before | After | Where to look |", "| --- | ---: | ---: | --- |"]
+            + [f"| {a} | {b} | {c} | {d} |" for a, b, c, d in rows]
+            + ["", "Expressions are inside screen times; Jigx exposes no separate expression timing.", ""])
 
 
 def screen_lines(pre, post):
@@ -167,14 +260,22 @@ def report(folder, solution=None):
     lines = [f"# {title}", ""]
     timings_before, timings_after = read(folder, "before", "timings.json"), read(folder, "after", "timings.json")
     screens_pre, screens_post = read(folder, "screens", "pre.json"), read(folder, "screens", "post.json")
-    lines += ["## Sync", ""] + timing_lines(comparison) + [""]
+    pre, post = load_runs(folder, "pre"), load_runs(folder, "post")
+    android_screens = (read(folder, "screens", "pre-android.json"), read(folder, "screens", "post-android.json"))
+    lines += overview(folder, pre, post, timings_before, timings_after,
+                      {"Screen": (screens_pre, screens_post), "Android screen": android_screens},
+                      read(folder, "before", "static.json"), after_static)
+    lines += ["## Sync", ""] + timing_lines(comparison, pre) + [""]
+    lines += ["## Functions", ""] + function_lines(pre, post) + [""]
     lines += ["## Queries and actions", ""] + query_lines(timings_before, timings_after) + [""]
     lines += ["## Screens", ""] + screen_lines(screens_pre, screens_post) + [""]
     # Android, when it was timed too (track-load.py --android, time-screens.py --platform android).
     android_sync = read(folder, "runs", "comparison-android.json")
     android_pre, android_post = read(folder, "screens", "pre-android.json"), read(folder, "screens", "post-android.json")
-    if android_sync:
-        lines += ["## Sync (Android)", ""] + timing_lines(android_sync) + [""]
+    android_pre_runs = load_runs(folder, "pre-android")
+    if android_sync or android_pre_runs:
+        lines += ["## Sync (Android)", ""] + timing_lines(android_sync, android_pre_runs) + [""]
+        lines += ["## Functions (Android)", ""] + function_lines(android_pre_runs, load_runs(folder, "post-android")) + [""]
     if android_pre:
         lines += ["## Screens (Android)", ""] + screen_lines(android_pre, android_post) + [""]
     lines += ["## Findings by section", ""]

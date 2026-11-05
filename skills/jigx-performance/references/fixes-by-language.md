@@ -21,6 +21,7 @@ change needs a builder option you have not seen in the project, check the `jigx`
 | `ddl-invalidates-datasources` | In the index step, `entities: [default/debug]` (a table nothing binds to), and gate each statement on its table existing | Same in `executeSql({ entities: ['default/debug'], ... })` |
 | `ddl-ungated` | Add `when:` reading `sqlite_master` for the table, or list the table in `entities:` | The same `when` on the action, or the table in `entities` |
 | `or-across-keys` | Split the `OR` into one `UNION` branch per key, each with a matching index, then join back for the existing tie-break | Same change inside `.query(\`…\`)`; add the missing indexes to `executeSql({...})` |
+| `cte-join-no-index` | Join the table itself and move the CTE's expressions into `ON` and the select list; add the expression index if there is none; check the plan says `SEARCH` and the result is unchanged (`profile-query.py --compare`) | Same change inside `.query(\`…\`)`; the index in `executeSql({...})` |
 | `order-by-unindexed` | Index exactly the sort expression | Same, in the index step's `statements` |
 | `index-not-idempotent` | `CREATE INDEX IF NOT EXISTS` | Same, in the statement string |
 | `execute-sql-entities` | Add `entities: [default/debug]` | Add `entities: ['default/debug']` to `executeSql({...})` |

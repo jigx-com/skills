@@ -60,7 +60,8 @@ Follow `references/customer-review.md`:
 2. **Audit**: static scan and plan check into `perf-review/before/`.
 3. **Time the current solution** after publishing it to the test solution: sync
    (`track-load.py`, three runs; `--android` on an Android emulator), every query and
-   `execute-sql` action on the test user's synced database (`time-queries.mjs`), and the
+   `execute-sql` action on the test user's synced database and at 10x its data
+   (`time-queries.mjs --scale 10`), each function from the sync steps, and the
    cold start and screen open times (`time-screens.py` with Maestro, three runs a screen,
    iOS and Android). Expressions have no runtime timing; they show in
    screen time and are located by the audit.
@@ -93,7 +94,7 @@ Follow `references/customer-review.md`:
    transfers, syncs on every focus), unused datasources and watched tables, per-row
    datasource reads, uncapped searches, list rules (an `id` in every datasource, no
    `instanceId` on items, built-in items, `jig.list`, fixed height), `rewriteQuery`,
-   unindexed, wrapped and `OR`-across-keys filters, unindexed sorts, `execute-sql` DDL
+   unindexed, wrapped and `OR`-across-keys filters, joins on CTE columns no index serves, unindexed sorts, `execute-sql` DDL
    risks, heavy expressions, solution state and JSONata traps (`USAGE.md` lists them
    with priorities). Every finding is a lead to measure, not a verdict. Then list full
    scans and unused indexes from the query planner:
@@ -187,11 +188,13 @@ Follow `references/customer-review.md`:
   Simulator or a rooted Android emulator (`--android`): scopes, entries, queue, row counts, slow-datasource log lines, waterfall.
 - `scripts/time-queries.mjs` - every datasource query, `execute-sql` step (rolled back)
   and index build timed on a copy of a device database, parameters sampled from the
-  data; `--baseline` compares with an earlier run. Node 22.5+.
+  data; `--scale 10` repeats it at ten times the data and lists what grows faster than
+  the data; `--baseline` compares with an earlier run. Node 22.5+.
 - `scripts/time-screens.py` - screen open and cold-start times (to a ready element) in
   the iOS Simulator or on Android through generated Maestro flows; `--compare` flags only changes beyond run
   noise.
-- `scripts/review-report.py` - the review report: sync, query, action and screen times
+- `scripts/review-report.py` - the review report: an overview of every area, then sync,
+  function, query, action and screen times
   before and after, findings per section, changes applied, what was not verified.
 - `scripts/compare-runs.py` - medians and per-scope and per-entry change between
   before and after runs, with warnings for weak comparisons.

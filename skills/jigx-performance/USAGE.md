@@ -102,6 +102,7 @@ What it checks:
 | Sync | tables synced that nothing reads; full pulls with no modified-date filter; OData pulls without `$select`; tables over 5 MB or 5,000 rows | medium; full pulls and `$select` low unless `--db` shows big tables |
 | Sync behaviour | 4+ sync calls run one after another (parallel waves); table-change handlers with no guard, or a guard that reads datasources on sync tables; an action started by a handler and by an action that writes the handler's table; file transfers left sequential | medium (an unguarded handler on a sync table is high) |
 | Unnecessary loads | global datasources nothing uses; tables a datasource watches but does not read; a sync on every screen focus | medium |
+| Joins | a join on columns a CTE computes from one table (`JOIN cte ON cte.col = …`): no index is used, the table is scanned for every row | high on a list, otherwise medium |
 | Indexes | index steps that re-run every bound datasource or roll back on a fresh install; filters and sorts no index matches; an `OR` across keys of one table with an unindexed key | high (medium for a one-table step); per-row `OR` high, otherwise medium; filters and sorts low unless 1,000+ rows |
 | Lists | datasource reads per row; searches with no `LIMIT`; a list datasource with no `id`; `instanceId` on list items; custom components as items | medium |
 | List components | `component.list` bound to data (use `jig.list`); `hasDynamicHeight`; any other datasource with no `id` | low |
@@ -130,7 +131,8 @@ took them from 117 s to 24 s.
 | Area | How | Note |
 | --- | --- | --- |
 | Sync | the app's sync tables, sampled live, three sign-ins, on the iOS Simulator or a Google APIs Android emulator | time to ready, each scope and step; snapshot timeouts, rows hashed for lack of an id, and every expression error with its expression and screen |
-| Queries and actions | every query, `execute-sql` step and index build run on a copy of the test user's database | host times: right for ranking and before/after, a phone is slower |
+| Functions | each sync step: its REST or OData call and the write of its rows | calls outside sync (save, submit) are timed as screen journeys |
+| Queries and actions | every query, `execute-sql` step and index build run on a copy of the test user's database, then again at 10x its rows | host times: right for ranking and before/after, a phone is slower; the 10x run lists what grows faster than the data, which a small test user hides |
 | Screens | Maestro taps and waits for an element that appears once the data is there, three runs, on the iOS Simulator or Android | includes datasources, expressions and rendering |
 | Cold start | Maestro stops the app, launches it and waits for the first data on Home | start-up, solution load and the first datasources |
 | Expressions | no separate timing exists in Jigx | inside screen time; the audit finds the costly ones |
@@ -148,7 +150,7 @@ YAML folder or an SDK `build/output.json`.
 | `check-performance.mjs` | the audit (`--report`, `--db`, `--baseline`, `--fail-on`) |
 | `pr-check.mjs` | the PR regression check against the target branch (CI: `ci/jigx-performance.yml`) |
 | `check-plans.py` | query plans: full scans, unused indexes, CI guards |
-| `time-queries.mjs` | every query, action and index build timed on a device database copy (`--baseline`) |
+| `time-queries.mjs` | every query, action and index build timed on a device database copy (`--scale 10`, `--baseline`) |
 | `time-screens.py` | screen and cold-start times through Maestro, iOS or Android (`--platform`, `--compare`) |
 | `track-load.py` / `compare-runs.py` | live sync tracking in the iOS Simulator or an Android emulator (`--android`); before/after medians |
 | `profile-query.py` | one query at 1x and 10x data, before and after an index |

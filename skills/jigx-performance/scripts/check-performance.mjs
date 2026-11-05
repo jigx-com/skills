@@ -223,6 +223,43 @@ export function columnExpr(sql, name) {
 // `h.id = q.k OR json_extract(h.data, '$.ApptID') = q.k`. SQLite cannot use one index per arm
 // for such an OR, so it scans the table for every row it is evaluated for. Returns
 // [{keys, perRow}] where perRow means the OR sits in a JOIN ON or a correlated subquery.
+// CTEs that compute columns from one table (SELECT json_extract(data, ...) AS x FROM t) and are
+// then joined on those columns. SQLite flattens such a CTE, but it does not look rows up through
+// an expression index on a column reached this way: the join scans the table for every outer
+// row (SCAN t USING INDEX ..., not SEARCH). Joining the table itself lets the index work.
+export function cteJoins(sql) {
+  const masked = maskSql(sql);
+  const ctes = new Map();
+  const head = /(?:\bWITH|,)\s*(\w+)\s+AS\s+(?:NOT\s+)?(?:MATERIALIZED\s+)?\(/gi;
+  for (const m of masked.matchAll(head)) {
+    let depth = 1, i = m.index + m[0].length;
+    for (; i < masked.length && depth; i++) depth += masked[i] === '(' ? 1 : masked[i] === ')' ? -1 : 0;
+    const body = masked.slice(m.index + m[0].length, i - 1);
+    const from = /^\s*SELECT\b([\s\S]*?)\bFROM\s+(\[?[\w/-]+\]?)(?:\s+(?:AS\s+)?(\w+))?\s*([\s\S]*)$/i.exec(body);
+    if (!from || /\b(JOIN|GROUP\s+BY|UNION|DISTINCT|LIMIT)\b|json_each|json_tree/i.test(body) || /\bSELECT\b/i.test(from[1]) || /^\s*,/.test(from[4])) continue;
+    // Columns computed by an expression: the ones an expression index would have to match.
+    const computed = new Set();
+    let depth2 = 0, part = '';
+    for (const ch of from[1] + ',') {
+      if (ch === '(') depth2++; else if (ch === ')') depth2--;
+      if (ch === ',' && depth2 === 0) {
+        const a = /^\s*([\s\S]*?)\s+AS\s+(\w+)\s*$/i.exec(part);
+        if (a && /\(/.test(a[1])) computed.add(a[2].toLowerCase());
+        part = '';
+      } else part += ch;
+    }
+    if (computed.size) ctes.set(m[1].toLowerCase(), {table: from[2].replace(/^\[|\]$/g, ''), computed});
+  }
+  const out = [];
+  for (const j of masked.matchAll(/\bJOIN\s+(\w+)(?:\s+AS)?\s+(\w+)\s+ON\b([\s\S]*?)(?=\b(?:LEFT|INNER|CROSS|JOIN|WHERE|GROUP|ORDER|LIMIT|UNION)\b|\)\s*(?:,|SELECT)|$)/gi)) {
+    const cte = ctes.get(j[1].toLowerCase());
+    if (!cte) continue;
+    const cols = [...j[3].matchAll(new RegExp(`\\b${j[2]}\\.(\\w+)`, 'gi'))].map(c => c[1].toLowerCase()).filter(c => cte.computed.has(c));
+    if (cols.length) out.push({cte: j[1], alias: j[2], table: cte.table, columns: [...new Set(cols)]});
+  }
+  return out;
+}
+
 export function orAcrossKeys(sql) {
   const masked = maskSql(sql);
   const out = [], seen = new Set();
@@ -333,6 +370,7 @@ export const RULES = {
   'component-list-for-data': {priority: 'low', section: 'C', fix: 'Use jig.list, which virtualises, for a datasource list that can exceed about ten rows (CO-02).'},
   'list-dynamic-height': {priority: 'low', section: 'C', fix: 'Use fixed-height items; hasDynamicHeight measures every item (CO-03).'},
   'rewrite-query-on': {priority: 'low', section: 'B', fix: "Write json_extract in full and set rewriteQuery: false (DS-03); small gain, do it after index and list fixes."},
+  'cte-join-no-index': {priority: 'medium', section: 'B', fix: 'Join the table itself (LEFT JOIN customers AS c ON trim(c.id) = …) and write the expressions in the ON clause, so the expression index is used; check the plan says SEARCH, and that the result is unchanged (profile-query.py --compare).'},
   'or-across-keys': {priority: 'high', section: 'B', fix: 'Split the OR into one UNION branch per key, each with a matching index; adding indexes alone does not help while the OR stays.'},
   'order-by-unindexed': {priority: 'low', section: 'B', fix: 'If the list can grow, ship an expression index on exactly this sort expression.'},
   'watched-table-unread': {priority: 'medium', section: 'E', fix: 'Remove the table from entities:; the datasource re-runs on every change to it.'},
@@ -554,6 +592,10 @@ export function checkPerformance(app, {stats = null, sources = {}} = {}) {
         `OR across ${o.keys.join(', ')}${o.perRow ? ', evaluated per row (JOIN ON or a correlated subquery)' : ''}; no index on ${missing.join(', ')}, so SQLite scans.`,
         {priority: o.perRow || rows >= 1000 ? 'high' : 'medium'});
     }
+    for (const c of cteJoins(query))
+      add('cte-join-no-index', `${path}.options.query`,
+        `Joins ${c.cte} on ${c.columns.map(x => `${c.alias}.${x}`).join(', ')}, columns the CTE computes from ${c.table}: no index is used, so ${c.table} is scanned for every row${listSources.has(node) ? ' of this list' : ''}.`,
+        listSources.has(node) || rows >= 1000 ? {priority: 'high'} : {});
     for (const t of new Set(orderByTerms(query)))
       if (!indexed.has(t)) add('order-by-unindexed', `${path}.options.query`, `ORDER BY ${t} has no matching index${rows ? ` (${rows} rows)` : ''}.`, rows >= 1000 ? {priority: 'medium'} : {});
     const sqlLower = maskSql(query).toLowerCase().replace(/\s+/g, ' ');
