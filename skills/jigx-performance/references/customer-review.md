@@ -99,8 +99,14 @@ screen size, start-up, sync shape, writes, credentials. Then present:
 1. **Overview**: the timings from step 2 (sync time to ready and the slowest steps, the
    slowest queries and actions, each screen's open time) and the findings by section.
 2. **Proposed changes, grouped by section A–H** (`recipe-index.md`), sections ordered
-   by the highest priority they contain, then by measured cost. Within a section, high
-   first. For each change:
+   by the highest priority they contain, then by measured cost. Head each section with
+   its name and one line on what it means for the app (`SECTION_MEANING` in
+   `check-performance.mjs`; the audit report has the same table), so a reader who has
+   never seen the letters knows why the group matters. Within a section, high first.
+   Mark each change **Needs fixing** (a confirmed high or medium finding, a measured slow
+   step or a logged expression error) or **Optional** (low, or a small measured gain).
+   Every relevant finding appears in one of the two lists or under "Not proposed"; none
+   is dropped silently. For each change:
    - **what and where**: the file and line in the solution's language, as a short diff
      (`.jigx` for YAML, `src/*.ts` for SDK; `fixes-by-language.md`)
    - **why**: the finding and the time it costs (from step 2)
@@ -111,7 +117,8 @@ screen size, start-up, sync shape, writes, credentials. Then present:
 
 Propose a fix for **every expression error the runs logged** (`track-load.py` lists each
 with its expression and screen), not only the slow parts: a failing expression blanks
-the field or condition it drives. Then stop and ask which sections or changes to apply. Do not change any file before the
+the field or condition it drives. Then stop and ask, recommending every **Needs fixing**
+change; the user may pick sections or single changes instead. Do not change any file before the
 user agrees. Approval for one section does not cover another.
 
 ## 4. Apply, publish and time again

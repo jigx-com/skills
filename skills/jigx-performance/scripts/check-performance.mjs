@@ -846,6 +846,18 @@ export async function tableStats(dbPath) {
 const SECTIONS = {A: 'Measure and track', B: 'Queries and indexes', C: 'Lists and rendering', D: 'State and expressions',
   E: 'Screens and start-up', F: 'Sync', G: 'Writes and duplicates', H: 'Security and logs'};
 
+// What each section means to the user, in the words shown with every proposal.
+export const SECTION_MEANING = {
+  A: 'How the app is timed and compared. Changes here make the numbers trustworthy; they do not make the app faster.',
+  B: 'How fast the app reads its local database. Slow here: screens, lists and actions wait for SQL, more as data grows.',
+  C: 'How lists are built and drawn. Slow here: lists open late, scroll badly or redraw every row.',
+  D: 'Work redone in expressions and state. Slow here: screens lag when a value changes, or an expression fails and blanks a field.',
+  E: 'Work done when the app starts or a screen opens. Slow here: long cold start or screen open.',
+  F: 'How data comes from the server. Slow here: long sign-in, refresh and screens that wait for a sync.',
+  G: 'Saving and sending records. Problems here are duplicate or lost records, not speed.',
+  H: 'Credentials, logging and errors. Problems here are security risk or failures nobody sees.',
+};
+
 export function markdownReport({title, findings, parseErrors = [], stats}) {
   const count = p => findings.filter(f => f.priority === p).length;
   const lines = [`# Performance audit: ${title}`, '',
@@ -853,6 +865,14 @@ export function markdownReport({title, findings, parseErrors = [], stats}) {
     'Each finding is a lead from a static scan: confirm it on the device before changing anything',
     '(row and byte counts, a query plan, a timed load). Fix high first, one section at a time.', ''];
   if (parseErrors.length) lines.push(`Not scanned (YAML errors): ${parseErrors.map(e => e.file).join(', ')}`, '');
+  const sections = Object.keys(SECTIONS).filter(s => findings.some(f => f.section === s));
+  if (sections.length) {
+    lines.push('## What the sections mean', '', '| § | Section | What it means | High | Medium | Low |',
+      '| --- | --- | --- | ---: | ---: | ---: |',
+      ...sections.map(s => `| ${s} | ${SECTIONS[s]} | ${SECTION_MEANING[s]} | ${
+        PRIORITIES.map(p => findings.filter(f => f.section === s && f.priority === p).length).join(' | ')} |`),
+      '', 'High and medium findings need fixing once confirmed in the source; low ones are optional.', '');
+  }
   for (const p of PRIORITIES) {
     const items = findings.filter(f => f.priority === p);
     if (!items.length) continue;

@@ -43,6 +43,18 @@ SECTIONS = {
     "G": "Writes and duplicates",
     "H": "Security and logs",
 }
+
+# What each section means to the user; kept in step with SECTION_MEANING in check-performance.mjs.
+SECTION_MEANING = {
+    "A": "How the app is timed and compared; makes the numbers trustworthy, not the app faster.",
+    "B": "How fast the app reads its local database: screens, lists and actions waiting for SQL.",
+    "C": "How lists are built and drawn: lists that open late, scroll badly or redraw every row.",
+    "D": "Work redone in expressions and state: screens that lag, or expressions that fail and blank a field.",
+    "E": "Work done when the app starts or a screen opens: cold start and screen open.",
+    "F": "How data comes from the server: sign-in, refresh and screens waiting for a sync.",
+    "G": "Saving and sending records: duplicate or lost records, not speed.",
+    "H": "Credentials, logging and errors: security risk or failures nobody sees.",
+}
 CODE_SECTION = {
     "unindexed-predicate": "B", "wrapped-predicate": "B", "execute-sql-entities": "B",
     "ddl-invalidates-datasources": "B", "index-not-idempotent": "B", "ddl-ungated": "B",
@@ -292,6 +304,9 @@ def report(folder, solution=None):
     else:
         lines += ["| § | Section | Finding | Before | After |", "| --- | --- | --- | ---: | ---: |"]
         lines += [f"| {s} | {SECTIONS[s]} | {label} | {b} | {a} |" for s, label, b, a in section_rows(before, after)]
+    shown = sorted({s for s, _, _, _ in section_rows(before, after)})
+    if shown:
+        lines += ["", "What the sections mean:", ""] + [f"- **{s} {SECTIONS[s]}**: {SECTION_MEANING[s]}" for s in shown]
     lines += ["", "Static counts are leads, not timings; sections D-H also need review the scripts cannot do.", ""]
     if changes:
         lines += ["## Changes applied", ""]

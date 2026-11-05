@@ -27,7 +27,10 @@ the user; ask as little as possible.
    neither is found.
 2. **Audit it** (read-only, seconds; "Audit" steps 1 and 4). Show in plain words: the
    counts by priority, then each high and medium finding you confirmed in the source,
-   as "what is wrong · where · the fix", grouped by section. Put the full list in
+   as "what is wrong · where · the fix", grouped by section, each section headed by its
+   name and what it means for the app (`SECTION_MEANING` in `check-performance.mjs`,
+   e.g. "F Sync: how data comes from the server; slow here means long sign-in"). Say
+   plainly that every confirmed high and medium finding needs fixing. Put the full list in
    `perf-review/before/audit.md` and say where it is.
 3. **Ask one question** with these choices:
    - **Time it and fix it**: the full review below (timings, fixes you approve,
@@ -66,10 +69,14 @@ Follow `references/customer-review.md`:
    iOS and Android). Expressions have no runtime timing; they show in
    screen time and are located by the audit.
 4. **Propose** with the overview (`review-report.py`): changes grouped by section A–H,
-   ordered by priority, each written as a diff in the solution's language (`.jigx` or
-   `src/*.ts`, `references/fixes-by-language.md`) with file, reason, measured cost,
-   expected effect, risk and the timing that should move.
-5. **Stop and ask which sections to apply.** Change nothing before the user agrees.
+   ordered by priority, each section headed by what it means for the app, each change
+   written as a diff in the solution's language (`.jigx` or `src/*.ts`,
+   `references/fixes-by-language.md`) with file, reason, measured cost, expected effect,
+   risk and the timing that should move. Mark every change **Needs fixing** (a confirmed
+   high or medium finding, a measured slow step, an expression error) or **Optional**
+   (low), and list what is left alone and why, so nothing relevant is missed.
+5. **Stop and ask.** Recommend applying every **Needs fixing** change; the user may
+   pick sections instead. Change nothing before the user agrees.
 6. Apply approved sections one commit each, rebuild and check after each, publish to the
    same test solution and **time everything again** (`post`); compare with
    `compare-runs.py`, `time-queries.mjs --baseline` and `time-screens.py --compare`, and

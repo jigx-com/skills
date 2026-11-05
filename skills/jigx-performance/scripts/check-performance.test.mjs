@@ -122,6 +122,8 @@ test('markdown report groups findings by priority and code with the fix once', (
   assert.match(md, /\*\*0 high · 2 medium · 0 low\*\*/);
   assert.match(md, /### per-row-datasource-read \(2\) · C Lists and rendering/);
   assert.equal(md.split('**Fix:**').length, 2);
+  assert.match(md, /\| C \| Lists and rendering \| How lists are built and drawn\. .* \| 0 \| 2 \| 0 \|/);
+  assert.doesNotMatch(md, /\| B \| Queries and indexes/);
 });
 
 test('loads a YAML solution folder into the output.json shape', {skip: spawnSync('ruby', ['-v']).status !== 0 && 'ruby not installed'}, () => {
