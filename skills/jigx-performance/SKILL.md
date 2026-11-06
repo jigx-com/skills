@@ -22,10 +22,11 @@ delta design and writes live in the `jigx` skill (`sync-orchestration.md`,
 the user; ask as little as possible.
 
 1. **Show where you are, then ask once.** Run `scripts/preflight.py <folder>` (the
-   current folder, or the path given; read-only, a few seconds) and show its four lines:
+   current folder, or the path given; read-only, a few seconds) and show what it prints:
    the solution and type (YAML when it has `index.jigx`, SDK when it has `src/app.ts`),
    the **branch and commit** with any uncommitted changes, the booted or connected devices
-   with their Jigx apps, and what timing is missing. Then ask one question: **review this
+   with their Jigx apps, and the numbered setup steps timing still needs, each with its
+   fix. Then ask one question: **review this
    branch** (recommended), **another branch or folder**, or **set up a device first**.
    Do nothing else before the answer: the branch checked out is often not the one the
    user means. Ask for the path only if no solution is found. For SDK, run `jigx build`
@@ -51,16 +52,17 @@ audit [path]`**: steps 1 and 2 above, no question.
 Approved fixes go on a new branch made from it (`perf/<short-name>`) or in a copy, and
 you say which before the first change.
 
-**Timing needs a device; set it up, do not skip it.** Before any timing step, rerun
-`preflight.py`. With no device booted, say so and offer to boot one: an iOS Simulator
-(`xcrun simctl boot <udid>`, shown in DeviceHub in Xcode 27) or an Android emulator
-(`emulator -avd <name>`; a Google APIs image for sync timing), with the Jigx app and the
-test user signed in, then wait for the user to confirm. Name every other missing tool
-with its install command in one message: Node 22.5+, Maestro (`brew install
-mobile-dev-inc/tap/maestro`) and Java 17+ for screen times, and for SDK projects the
-`jigx_debug` MCP server. Only a tool the user declines to install is skipped, and the
-report says that area was not measured. Time both platforms when both are available,
-one at a time; close an emulator before starting another.
+**Timing needs a device; set it up with the user, do not skip it.** Before any timing
+step, rerun `preflight.py`. When it lists setup steps, or "set up a device first" was
+chosen, or a simulator, emulator, adb or Maestro command fails, follow
+`references/device-setup.md`: take the steps one at a time, ask before each install,
+download or boot, have the user run `sudo` commands themselves with `!`, match any error
+in its "Problems and fixes" table, and rerun `preflight.py` after each step until the
+device shows a Jigx app with the test user signed in. For SDK projects also check the
+`jigx_debug` MCP server. Only a step the user declines is skipped (Android is optional
+when they time iOS only), and the report says that area was not measured. Time both
+platforms when both are available, one at a time; close an emulator before starting
+another.
 
 Loaded from the task instead of a command: when the user writes or changes a
 `datasource.sqlite` query, an `action.execute-sql` index or a list, follow "Build";
@@ -180,6 +182,8 @@ Follow `references/customer-review.md`:
 - `references/customer-review.md` - the review flow: audit, time, propose by section,
   approval, apply, publish, time again, report.
 - `references/fixes-by-language.md` - each finding's fix in YAML and in TypeScript SDK.
+- `references/device-setup.md` - setting up the iOS Simulator, an Android emulator,
+  the Jigx app, Node, Java and Maestro with the user, and fixes for common setup errors.
 - `references/run-and-track.md` - live load timeline in the simulator, three runs a
   side, medians and the slowdown threshold, what can be timed where.
 - `references/indexes-and-execute-sql.md` - expression indexes, matching predicate

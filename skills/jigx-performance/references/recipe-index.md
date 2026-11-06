@@ -7,6 +7,7 @@ Use this index to load the smallest reference needed for the task.
 | A screen is slow or times out; profiling a query; host vs device numbers | `measuring.md` |
 | Reviewing a customer solution end to end: baseline, proposal, approval, apply, report | `customer-review.md` |
 | Timing a load before and after a change; live sync timeline; comparing runs | `run-and-track.md` |
+| Setting up a simulator, emulator, the Jigx app, Node, Java or Maestro; a setup command fails | `device-setup.md` |
 | Adding or changing an expression index; `OR` lookups; plan guards; shipping DDL with `action.execute-sql` | `indexes-and-execute-sql.md` |
 | Writing a list or search datasource; list components; list items that read datasources; JSONata guards over SQL results | `query-shape-and-lists.md` |
 | Unused datasources, watched tables, state, shared expressions, screen size, start-up work | `state-and-screens.md` |

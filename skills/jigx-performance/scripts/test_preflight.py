@@ -23,7 +23,8 @@ class PreflightTest(unittest.TestCase):
         with open(os.path.join(d, "new.jigx"), "w") as f:
             f.write("title: New\n")
         r = {"folder": d, "solution": pf.solution(d), "git": pf.git(d), "ios": [], "android": [],
-             "tools": {"node": "v20.1.0", "node_ok": False, "maestro": True, "java": True}}
+             "tools": {"node": "v20.1.0", "node_ok": False, "maestro": True, "java": 17, "java_ok": True, "brew": True},
+             "env": env()}
         self.assertEqual(r["solution"], {"type": "YAML", "name": "demo"})
         self.assertEqual((r["git"]["branch"], r["git"]["uncommitted"]), ("feature/x", 1))
         out = pf.text(r)
@@ -31,6 +32,85 @@ class PreflightTest(unittest.TestCase):
         self.assertIn("1 uncommitted change(s)", out)
         self.assertIn("Devices: none booted or connected", out)
         self.assertIn("Node 22.5+", out)
+        self.assertIn("fix: xcrun simctl boot SIM-1", out)
+
+    def test_ready_machine_needs_nothing(self):
+        r = report(ios=[{"name": "iPhone 18 Pro", "udid": "SIM-1", "runtime": "iOS-27-0", "jigx_apps": ["com.jigx.frontline"]}],
+                   android=[emu(rootable=True)])
+        self.assertEqual(pf.setup_steps(r), [])
+        self.assertIn("Setup for timing: nothing missing", pf.text(r))
+
+    def test_old_java_and_missing_maestro(self):
+        r = report(tools={"java": 11, "java_ok": False, "maestro": False})
+        fixes = " | ".join(s["fix"] for s in pf.setup_steps(r))
+        self.assertIn("openjdk@17", fixes)
+        self.assertIn("mobile-dev-inc/tap/maestro", fixes)
+
+    def test_no_xcode_needs_sudo_select(self):
+        steps = pf.setup_steps(report(env={"xcode": False}))
+        self.assertIn("sudo xcode-select", steps[0]["fix"])
+
+    def test_play_only_avd_suggests_google_apis_image(self):
+        r = report(android=[], env={"avds": [{"name": "pixel-play", "image": "google_apis_playstore", "google_apis": False}]})
+        step = [s for s in pf.setup_steps(r) if s["for"] == "Android"][0]
+        self.assertIn("no Google APIs emulator", step["problem"])
+        self.assertIn("google_apis;arm64-v8a", step["fix"])
+        self.assertIn("pixel-play", step["problem"])
+
+    def test_google_apis_avd_not_running_is_started(self):
+        r = report(android=[])
+        self.assertIn("emulator -avd jigx-api34", android_steps(r)[0]["fix"])
+
+    def test_play_emulator_running_and_unauthorized_phone(self):
+        r = report(android=[emu(rootable=False)], env={"android_other": [{"serial": "R5C", "state": "unauthorized"}]})
+        problems = " | ".join(s["problem"] for s in pf.setup_steps(r))
+        self.assertIn("Google Play image", problems)
+        self.assertIn("R5C is unauthorized", problems)
+
+    def test_device_without_jigx_app(self):
+        r = report(ios=[{"name": "iPhone 18 Pro", "udid": "SIM-1", "runtime": "iOS-27-0", "jigx_apps": []}],
+                   android=[emu(rootable=True, apps=[])])
+        fixes = " | ".join(s["fix"] for s in pf.setup_steps(r))
+        self.assertIn("xcrun simctl install SIM-1", fixes)
+        self.assertIn("adb -s emulator-5554 install", fixes)
+
+    def test_no_android_sdk(self):
+        r = report(android=[], env={"android_sdk": None, "adb": False, "emulator": False, "avds": []})
+        self.assertIn("android-studio", android_steps(r)[0]["fix"])
+
+    def test_java_version_parsing(self):
+        orig = pf.run
+        try:
+            for out, want in (('openjdk version "11.0.20.1" 2023-08-24', 11), ('java version "1.8.0_391"', 8),
+                              ('openjdk version "17.0.9"', 17), ("The operation couldn't be completed. Unable to locate a Java Runtime.", None)):
+                pf.run = lambda cmd, cwd=None, stderr=False, o=out: o if cmd[0] == "java" else ""
+                self.assertEqual(pf.tools()["java"], want, out)
+        finally:
+            pf.run = orig
+
+
+def android_steps(r):
+    return [s for s in pf.setup_steps(r) if s["for"] == "Android"]
+
+
+def env(**over):
+    e = {"mac": True, "arch": "arm64-v8a", "xcode": True, "ios_runtimes": ["iOS 27.0"],
+         "ios_shutdown": [{"name": "iPhone 18 Pro", "udid": "SIM-1", "runtime": "iOS-27-0"}],
+         "android_sdk": "/sdk", "adb": True, "emulator": True, "sdkmanager": True,
+         "avds": [{"name": "jigx-api34", "image": "google_apis", "google_apis": True}], "android_other": []}
+    e.update(over)
+    return e
+
+
+def emu(rootable, apps=("com.jigx.frontline",)):
+    return {"serial": "emulator-5554", "model": "Pixel 6", "emulator": True, "rootable": rootable, "jigx_apps": list(apps)}
+
+
+def report(ios=(), android=(), tools=None, env=None):
+    t = {"node": "v22.16.0", "node_ok": True, "maestro": True, "java": 17, "java_ok": True, "brew": True}
+    t.update(tools or {})
+    return {"folder": "/x", "solution": {"type": "YAML", "name": "demo"}, "git": None, "ios": list(ios),
+            "android": list(android), "tools": t, "env": globals()["env"](**(env or {}))}
 
 
 if __name__ == "__main__":

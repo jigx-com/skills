@@ -13,8 +13,9 @@ Claude:
 
 1. shows what it found and asks before doing anything: the solution, the **branch and
    commit** checked out (with any uncommitted changes), the simulators and devices
-   running with their Jigx apps, and what timing still needs. You confirm the branch,
-   pick another, or set up a device first
+   running with their Jigx apps, and what timing still needs. You confirm, or check out
+   another branch yourself or set up a device and run it again. Claude never switches the
+   branch for you
 2. audits it in a few seconds and shows each confirmed problem as *what is wrong ·
    where · the fix*, by priority (full list in `perf-review/before/audit.md`)
 3. asks what next:
@@ -42,9 +43,14 @@ nothing is ever published to or timed against production.
 | Time on Android | Android SDK platform-tools (`adb`) and an emulator or a phone with USB debugging; for sync timing a **Google APIs** emulator image (not Google Play), which allows `adb root` |
 | Publish | SDK: the `jigx_debug` MCP server. YAML: `copy-to-test.py` makes a renamed copy, then Jigx Builder in VS Code publishes it |
 
-Claude checks these before timing (`preflight.py`) and tells you what is missing. With no
-simulator or emulator running it offers to boot one and waits until the Jigx app is open
-with the test user signed in; it does not skip the timing on its own.
+You don't have to set these up first. Claude checks them before timing (`preflight.py`)
+and lists each missing piece with the command that fixes it: Xcode and an iOS runtime, a
+simulator, the Android SDK and a Google APIs emulator, the Jigx app on the device, Node,
+Java and Maestro. It then walks you through them one at a time, runs each install after you
+agree (you type `sudo` commands yourself), and when a simulator, emulator, adb or Maestro
+command fails it matches the error against known fixes (`references/device-setup.md`). It
+waits until the Jigx app is open with the test user signed in; it does not skip the timing
+on its own. Say "set up a device first" or "help me set up Android" at any time.
 
 ## Every PR: the regression check
 
@@ -157,7 +163,7 @@ YAML folder or an SDK `build/output.json`.
 | `pr-check.mjs` | the PR regression check against the target branch (CI: `ci/jigx-performance.yml`) |
 | `check-plans.py` | query plans: full scans, unused indexes, CI guards |
 | `time-queries.mjs` | every query, action and index build timed on a device database copy (`--scale 10`, `--baseline`) |
-| `preflight.py` | the first thing `/jigx-performance` shows: solution, branch and commit, devices and Jigx apps, missing tools |
+| `preflight.py` | the first thing `/jigx-performance` shows: solution, branch and commit, devices and Jigx apps, and each setup step timing still needs with its fix |
 | `copy-to-test.py` | a YAML solution copied to a test solution name, with the Builder organisation settings, for publishing |
 | `time-screens.py` | screen and cold-start times through Maestro, iOS or Android (`--platform`, `--compare`) |
 | `track-load.py` / `compare-runs.py` | live sync tracking in the iOS Simulator or an Android emulator (`--android`); before/after medians |
