@@ -371,6 +371,18 @@ def paused_spans(samples, armed, only=None):
     return spans
 
 
+def first_sync_s(spans, paused=()):
+    """Seconds of a scope's first sync: its first start to the end of the last resume of it."""
+    if not spans:
+        return None
+    start, end, i = spans[0][0], spans[0][1], 1
+    while i < len(spans) and spans[i][2]:  # resumed after an interruption: still the first sync
+        end, i = spans[i][1], i + 1
+    if end is None:
+        return None
+    return round((end - start - overlap_ms(start, end, paused)) / 1000, 2)
+
+
 def overlap_ms(a, b, spans):
     return sum(max(0, min(b, y) - max(a, x)) for x, y in spans) if a is not None and b is not None else 0
 
@@ -436,7 +448,11 @@ def summarise(label, db, samples, result, armed, ready_at, logs, final, scopes):
         # A restart after an interruption is the same sync resuming, not a second one.
         "scope_starts": {sid: sum(1 for sp in spans if not sp[2]) for sid, spans in sorted(runs.items())},
         "repeated_scopes": sorted(sid for sid, spans in runs.items() if sum(1 for sp in spans if not sp[2]) > 1),
-        "scopes": {sid: {"state": v["state"], "duration_s": scope_duration(sid, v)} for sid, v in run.items() if v},
+        "scopes": {sid: {"state": v["state"], "duration_s": scope_duration(sid, v),
+                         # The scope's first sync (with any resume after an interruption): what the
+                         # sign-in waits for. duration_s is its last sync, which a repeat moves.
+                         "first_duration_s": first_sync_s(runs.get(sid), paused_spans(samples, armed, sid))}
+                   for sid, v in run.items() if v},
         "entries": entries,
         "slowest_entries": sorted(((n, e["duration_s"]) for n, e in entries.items() if e["duration_s"] is not None),
                                   key=lambda x: -x[1])[:10],
@@ -535,6 +551,7 @@ def track(db, label, out, tables=(), scopes=(), interval=0.25, settle=5.0, timeo
             time.sleep(interval)
     summary = summarise(label, db, samples, result, armed, ready_at if result == "ready" else None, logs, final, scopes)
     summary["restarts"] = restarts
+    summary["interval_s"] = interval
     with open(os.path.join(out, f"{label}-summary.json"), "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
     total = summary["first_start_to_ready_s"]

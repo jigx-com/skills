@@ -62,7 +62,8 @@ export function parseCreateIndex(statement) {
   const close = matchParen(masked, open);
   if (close < 0) return null;
   return {
-    name: statement.slice(m.index, m.index + m[0].length).match(/INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?([^\s(]+)/i)[1],
+    // sqlite_master stores the name without its quoting: `idx`, "idx" and [idx] are idx.
+    name: statement.slice(m.index, m.index + m[0].length).match(/INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?([^\s(]+)/i)[1].replace(/^[`"\[]|[`"\]]$/g, ''),
     ifNotExists: Boolean(m[1]),
     table: statement.slice(m.index, m.index + m[0].length).match(/\bON\s+(\[[^\]]+\]|"[^"]+"|[^\s(]+)/i)[1].replace(/^[\["]|[\]"]$/g, ''),
     expressions: splitTop(statement.slice(open + 1, close)).map(normaliseExpr),

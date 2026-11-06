@@ -8,7 +8,9 @@ Standard library only. Reads a review folder laid out as:
   <folder>/after/static.json    the same after changes (optional until applied)
   <folder>/after/plans.json
   <folder>/runs/comparison.json compare-runs.py output (optional)
-  <folder>/before/timings.json  time-queries.mjs output (optional)
+  <folder>/runs/pre*-summary.json, post*-summary.json   track-load.py runs: pre, pre-1, pre-clean-2 …
+                                (pre-android-… is the Android side)
+  <folder>/before/timings.json  time-queries.mjs output (optional; --timings BEFORE AFTER for other files)
   <folder>/after/timings.json   time-queries.mjs --baseline before/timings.json (optional)
   <folder>/screens/pre.json     time-screens.py --label pre (optional)
   <folder>/screens/post.json    time-screens.py --label post --compare pre (optional)
@@ -63,6 +65,10 @@ CODE_SECTION = {
 }
 
 
+def read_path(path):
+    return read(os.path.dirname(path) or ".", os.path.basename(path))
+
+
 def read(folder, *parts):
     path = os.path.join(folder, *parts)
     if not os.path.exists(path) and parts[-1] == "static.json":
@@ -109,8 +115,9 @@ def section_rows(before, after):
 
 
 def load_runs(folder, prefix):
-    """track-load.py summaries labelled <prefix> or <prefix>-<n> in <folder>/runs."""
-    label = re.compile(rf"{re.escape(prefix)}(?:-\d+)?-summary\.json")
+    """track-load.py summaries labelled <prefix> or <prefix>-<anything> in <folder>/runs (pre-1, pre-clean-2),
+    but not <prefix>-android-…, which is the Android side."""
+    label = re.compile(rf"{re.escape(prefix)}(?:-(?!android)[\w.]+(?:-[\w.]+)*)?-summary\.json")
     out = []
     for path in sorted(glob.glob(os.path.join(folder, "runs", f"{prefix}*-summary.json"))):
         if label.fullmatch(os.path.basename(path)):
@@ -290,7 +297,7 @@ def screen_lines(pre, post):
                         "expressions and rendering, plus Maestro's overhead."]
 
 
-def report(folder, solution=None):
+def report(folder, solution=None, timings=(None, None)):
     before = findings(read(folder, "before", "static.json"), read(folder, "before", "plans.json"))
     after_static, after_plans = read(folder, "after", "static.json"), read(folder, "after", "plans.json")
     after = findings(after_static, after_plans) if (after_static or after_plans) else None
@@ -298,7 +305,8 @@ def report(folder, solution=None):
     changes = read(folder, "changes.json") or []
     title = "Performance review" + (f": {solution}" if solution else "")
     lines = [f"# {title}", ""]
-    timings_before, timings_after = read(folder, "before", "timings.json"), read(folder, "after", "timings.json")
+    timings_before = read_path(timings[0]) if timings[0] else read(folder, "before", "timings.json")
+    timings_after = read_path(timings[1]) if timings[1] else read(folder, "after", "timings.json")
     screens_pre, screens_post = read(folder, "screens", "pre.json"), read(folder, "screens", "post.json")
     pre, post = load_runs(folder, "pre"), load_runs(folder, "post")
     android_screens = (read(folder, "screens", "pre-android.json"), read(folder, "screens", "post-android.json"))
@@ -361,10 +369,12 @@ def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("folder", nargs="?", default=os.path.expanduser("~/jigx-perf-reviews"))
     p.add_argument("--solution")
+    p.add_argument("--timings", nargs=2, metavar=("BEFORE", "AFTER"),
+                   help="time-queries.mjs JSON files to use instead of before/ and after/timings.json")
     args = p.parse_args(argv)
     if not any(os.path.exists(os.path.join(args.folder, "before", n)) for n in ("static.json", "audit.json")):
         p.error(f"{args.folder}/before/static.json is missing; capture the baseline first")
-    text = report(args.folder, args.solution)
+    text = report(args.folder, args.solution, tuple(args.timings or (None, None)))
     with open(os.path.join(args.folder, "report.md"), "w", encoding="utf-8") as f:
         f.write(text)
     print(text)

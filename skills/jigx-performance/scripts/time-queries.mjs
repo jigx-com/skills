@@ -94,7 +94,11 @@ export function sampleQueries(sql) {
     return sql.slice(i, m.index).trim().replace(/^DISTINCT\s+/i, '');
   };
   const out = {};
-  for (const m of masked.matchAll(/=\s*[@:$](\w+)|[@:$](\w+)\s*=(?!=)/g)) {
+  // `= @p`, `@p =`, and the same with the parameter wrapped: `= trim(@p)`, `trim(COALESCE(@p, '')) =`
+  // (a barcode or search box compared to a trimmed key): the other side's real value still matches.
+  const WRAP = String.raw`(?:(?:trim|ltrim|rtrim|lower|upper|coalesce|ifnull|nullif)\s*\(\s*)`;
+  const pattern = new RegExp(String.raw`=\s*${WRAP}*[@:$](\w+)|${WRAP}*[@:$](\w+)(?:\s*,[^()=]*)?(?:\s*\))*\s*=(?!=)`, 'gi');
+  for (const m of masked.matchAll(pattern)) {
     const name = m[1] ?? m[2];
     if (out[name]) continue;
     const [a, b] = m[1] ? left(m.index) : right(m.index + m[0].length);
@@ -128,7 +132,8 @@ export function collect(app) {
       if (all.some(isExpr)) built.push(p);
       const statements = all.filter(sql => !isExpr(sql));
       const ddl = statements.filter(s => parseCreateIndex(s));
-      ddl.forEach(sql => indexes.push({path: p, sql, name: parseCreateIndex(sql).name}));
+      // One index can be created by several steps (start-up and after the initial sync): time it once.
+      ddl.forEach(sql => { const name = parseCreateIndex(sql).name; if (!indexes.some(i => i.name === name)) indexes.push({path: p, sql, name}); });
       const rest = statements.filter(s => !parseCreateIndex(s));
       if (rest.length) steps.push({path: p, statements: rest});
     }
@@ -220,7 +225,8 @@ export function growth(base, scaled, factor, {minMs = 10} = {}) {
       const timeX = b.ms > 0 ? r.ms / b.ms : null;
       const rowsX = b.rows ? r.rows / b.rows : null;
       const inflated = rowsX != null && rowsX > factor * 1.5;
-      const verdict = inflated ? 'rows inflated' : r.ms >= minMs && timeX != null && timeX > factor * 2 ? 'GROWS FASTER' : 'in line';
+      const verdict = (b.nullParams || r.nullParams) ? 'not measured (NULL parameters)'
+        : inflated ? 'rows inflated' : r.ms >= minMs && timeX != null && timeX > factor * 2 ? 'GROWS FASTER' : 'in line';
       rows.push({kind, where: r.where, ms_1x: b.ms, ms_nx: r.ms, time_x: timeX && round(timeX), rows_1x: b.rows, rows_nx: r.rows, verdict});
     }
   }
@@ -272,7 +278,9 @@ export function timeSolution(app, db, {params = {}, runs = 5, sources = {}} = {}
       const stmt = db.prepare(q.sql);
       const args = bind(q.sql);
       const {ms, max, result} = time(() => stmt.all(args), runs);
-      return {...base, ms, max, rows: result.length};
+      // A parameter the screen fills (a barcode, a search box) is NULL here; with no rows the
+      // query timed nothing, so its time is not a measurement: pass the value with --params.
+      return {...base, ms, max, rows: result.length, ...(base.unbound.length && !result.length ? {nullParams: true} : {})};
     } catch (e) { return {...base, error: e.message}; }
   }).sort((a, b) => (b.ms ?? -1) - (a.ms ?? -1));
 
@@ -300,6 +308,10 @@ export function compareTimings(before, after) {
       const b = old.get(r.where);
       if (!b || b.ms == null || r.ms == null) continue;
       const change = b.ms ? round((r.ms - b.ms) / b.ms * 100) : null;
+      if (b.nullParams || r.nullParams) {
+        rows.push({kind, where: r.where, before_ms: b.ms, after_ms: r.ms, change_pct: change, verdict: 'not measured (NULL parameters)'});
+        continue;
+      }
       // A host repeats a small query within about a millisecond, so a move counts when it is
       // 5 ms or more, or 1 ms or more and at least twice (2.5 -> 0.2 ms is faster, 0.3 -> 0.8 is noise).
       const diff = Math.abs(r.ms - b.ms), ratio = Math.max(r.ms, b.ms) / Math.max(Math.min(r.ms, b.ms), 0.05);
@@ -324,7 +336,15 @@ export function timingsReport({title, result, comparison, comparisonScaled, meta
   const total = xs => round(xs.reduce((s, r) => s + (r.ms ?? 0), 0));
   const slow = result.queries.filter(q => q.ms >= SLOW_MS);
   lines.push(`**${result.queries.length} queries, ${total(result.queries)} ms in total; ${slow.length} at ${SLOW_MS} ms or more. ` +
-    `${result.actions.length} execute-sql steps, ${total(result.actions)} ms. ${result.indexes.filter(i => i.ms != null).length} indexes built, ${total(result.indexes)} ms.**`, '');
+    `${result.actions.length} execute-sql steps, ${total(result.actions)} ms. ${result.indexes.length} indexes in the solution: ` +
+    `${result.indexes.filter(i => i.ms != null).length} built on the copy (${total(result.indexes)} ms), ` +
+    `${result.indexes.filter(i => i.note === 'already on the device').length} already on the device` +
+    `${result.indexes.some(i => i.error) ? `, ${result.indexes.filter(i => i.error).length} failed` : ''}.**`, '');
+  const nulls = result.queries.filter(q => q.nullParams);
+  if (nulls.length) lines.push(`## Timed on NULL parameters: not measured (${nulls.length})`, '',
+    'These queries compare a value the screen supplies (a barcode, a search box, a selected record) and returned no rows ' +
+    'with it NULL, so their time says nothing. Pass real values with --params params.json ({"name": "value"}) and time them again.', '',
+    ...nulls.slice(0, 20).map(q => `- \`${q.where}\`: ${q.unbound.map(n => '@' + n).join(', ')}`), '');
   for (const [heading, rows] of [['Before and after', comparison], [`Before and after at ${scale}x data`, comparisonScaled]]) {
     if (!rows?.length) continue;
     const moved = rows.filter(r => r.verdict !== 'same');
@@ -343,7 +363,7 @@ export function timingsReport({title, result, comparison, comparisonScaled, meta
     const shown = growthRows.filter(r => r.verdict !== 'in line').slice(0, 20);
     if (shown.length) {
       lines.push('| What | Where | 1x | ' + scale + 'x | Time | Rows | |', '| --- | --- | ---: | ---: | ---: | ---: | --- |');
-      for (const r of shown) lines.push(`| ${KIND[r.kind]} | \`${r.where}\` | ${r.ms_1x} ms | ${r.ms_nx} ms | ${r.time_x ?? '-'}x | ${r.rows_1x ?? '-'} → ${r.rows_nx ?? '-'} | ${r.verdict === 'GROWS FASTER' ? '⚠ grows faster' : 'rows inflated: a join key the scaling could not separate'} |`);
+      for (const r of shown) lines.push(`| ${KIND[r.kind]} | \`${r.where}\` | ${r.ms_1x} ms | ${r.ms_nx} ms | ${r.time_x ?? '-'}x | ${r.rows_1x ?? '-'} → ${r.rows_nx ?? '-'} | ${r.verdict === 'GROWS FASTER' ? '⚠ grows faster' : r.verdict.startsWith('not measured') ? 'not measured: NULL parameters' : 'rows inflated: a join key the scaling could not separate'} |`);
       lines.push('');
     }
     lines.push('Read the query plan of each item that grows faster (`profile-query.py`) before changing it.', '');

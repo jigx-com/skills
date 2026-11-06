@@ -6,9 +6,12 @@ Standard library only. Reads <folder>/*-summary.json, groups runs by label prefi
 to ready, the total sync work (also after ready) and the number of scope starts, each
 scope, and each sync entry, with the change in percent. A slowdown
 over --threshold percent (default 10) is flagged for investigation; it is a review
-threshold, not an SLA. A change smaller than --min-change seconds (default 0.5, two
-samples at track-load.py's 0.25 s interval) is reported as "same": entry times are
-only as precise as the sampling, so a one-sample step is not a regression.
+threshold, not an SLA. A change smaller than --min-change seconds (default 0.5) is reported as "same";
+for an entry the floor is three sampling intervals (0.75 s at track-load.py's 0.25 s,
+1.5 s on Android), since its start and end are each only as precise as one sample. A
+scope is compared by its first sync (a repeat sync before a fix moves its last start). An
+entry that is slower only because it now runs side by side with others is labelled
+"parallel now", not REGRESSION: the total shows whether running in parallel paid off.
 
 Writes <folder>/comparison.md and comparison.json, and prints the markdown. Android runs
 (--before pre-android --after post-android) write comparison-android.md and .json.
@@ -28,9 +31,9 @@ import sys
 
 
 def load(folder, prefix):
-    """Runs labelled <prefix> or <prefix>-<n>: "pre" takes pre-1..3, not pre-android-1."""
+    """Runs labelled <prefix> or <prefix>-<anything>: "pre" takes pre-1..3 and pre-clean-1, not pre-android-1."""
     runs = []
-    label = re.compile(rf"{re.escape(prefix)}(?:-\d+)?-summary\.json")
+    label = re.compile(rf"{re.escape(prefix)}(?:-(?!android)[\w.]+(?:-[\w.]+)*)?-summary\.json")
     for path in sorted(p for p in glob.glob(os.path.join(folder, f"{prefix}*-summary.json")) if label.fullmatch(os.path.basename(p))):
         with open(path, encoding="utf-8") as f:
             runs.append(json.load(f))
@@ -61,16 +64,39 @@ def metrics(runs):
     for key, section in (("scope", "scopes"), ("entry", "entries")):
         names = sorted({n for r in runs for n in r.get(section, {})})
         for n in names:
-            out[f"{key}: {n}"] = [r.get(section, {}).get(n, {}).get("duration_s") for r in runs]
+            # A scope by its first sync: a repeat sync (before a fix) moves its last start.
+            field = lambda d: d.get("first_duration_s", d.get("duration_s")) if key == "scope" else d.get("duration_s")
+            out[f"{key}: {n}"] = [field(r.get(section, {}).get(n, {})) for r in runs]
     return out
+
+
+def overlapped(run, name):
+    """True when the entry ran side by side with another entry in this run."""
+    e = run.get("entries", {}).get(name)
+    if not e or e.get("end_s") is None:
+        return False
+    return any(o.get("end_s") is not None and o["start_s"] < e["end_s"] and o["end_s"] > e["start_s"]
+               for n, o in run["entries"].items() if n != name)
+
+
+def share_parallel(before, after, name):
+    """Most after runs ran the entry in parallel, most before runs did not."""
+    frac = lambda runs: sum(overlapped(r, name) for r in runs) / len(runs) if runs else 0
+    return frac(after) > 0.5 >= frac(before)
 
 
 def compare(before, after, threshold=10.0, min_change=0.5):
     b, a = metrics(before), metrics(after)
+    # Entry times come from samples: start and end are each off by up to one interval, so
+    # an entry change under three intervals is sampling noise.
+    interval = max([r.get("interval_s") or 0.25 for r in before + after] or [0.25])
     rows = []
     for name in list(dict.fromkeys(list(b) + list(a))):
         mb, ma = median(b.get(name, [])), median(a.get(name, []))
-        pct, verdict = change(mb, ma, threshold, min_change)
+        entry = name.startswith("entry: ")
+        pct, verdict = change(mb, ma, threshold, max(min_change, 3 * interval) if entry else min_change)
+        if entry and verdict == "REGRESSION" and share_parallel(before, after, name[len("entry: "):]):
+            verdict = "parallel now"  # it shares the network with other calls now; the total says if that paid off
         rows.append({"metric": name, "before_s": mb, "after_s": ma, "change_pct": pct, "verdict": verdict})
     warnings = []
     for side, runs in (("before", before), ("after", after)):

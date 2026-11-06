@@ -371,6 +371,42 @@ class InterruptedAndRestartTest(unittest.TestCase):
         self.assertEqual(tl.other_solutions_busy(self.db, 0), ["last-used"])
         self.assertEqual(tl.other_solutions_busy(self.db, time.time() * 1000 + 60000), [])
 
+class CompareVerdictTest(unittest.TestCase):
+    def summary(self, label, scope_first, scope_last, entries, interval=0.25):
+        return {"label": label, "machine": "m", "result": "ready", "first_start_to_ready_s": 3.0, "interval_s": interval,
+                "scopes": {"s": {"duration_s": scope_last, "first_duration_s": scope_first}},
+                "entries": entries, "snapshot_timeouts": {}, "log_errors": 0}
+
+    def test_scope_by_first_sync_and_parallel_entries_are_not_regressions(self):
+        serial = {"s/a": {"start_s": 0.0, "end_s": 0.26, "duration_s": 0.26}, "s/b": {"start_s": 0.3, "end_s": 1.0, "duration_s": 0.7}}
+        parallel = {"s/a": {"start_s": 0.0, "end_s": 1.4, "duration_s": 1.4}, "s/b": {"start_s": 0.0, "end_s": 1.0, "duration_s": 1.0}}
+        jitter = {"s/a": {"start_s": 0.0, "end_s": 0.78, "duration_s": 0.78}, "s/b": {"start_s": 0.8, "end_s": 1.5, "duration_s": 0.7}}
+        # before: the last start came from a repeat sync (2.0 s); its first sync took 3.0 s
+        before = [self.summary(f"pre-{i}", 3.0, 2.0, serial) for i in range(3)]
+        after = [self.summary(f"post-{i}", 3.0, 3.0, parallel) for i in range(3)]
+        rows = {r["metric"]: r for r in cr.compare(before, after)["rows"]}
+        self.assertEqual(rows["scope: s"]["verdict"], "same")
+        self.assertEqual(rows["entry: s/a"]["verdict"], "parallel now")
+        after = [self.summary(f"post-{i}", 3.0, 3.0, jitter) for i in range(3)]
+        rows = {r["metric"]: r for r in cr.compare(before, after)["rows"]}
+        self.assertEqual(rows["entry: s/a"]["verdict"], "same")  # 0.26 -> 0.78 s: two sample ticks
+
+    def test_first_sync_includes_the_resume(self):
+        self.assertEqual(tl.first_sync_s([[1000, 2000, False], [12000, 13000, True], [20000, 21000, False]],
+                                         [[2000, 12000]]), 2.0)
+        self.assertIsNone(tl.first_sync_s([[1000, None, False]]))
+
+class LabelTest(unittest.TestCase):
+    def test_re_runs_with_any_suffix_count_but_not_android(self):
+        d = tempfile.mkdtemp()
+        os.makedirs(os.path.join(d, "runs"))
+        for label in ("pre-1", "pre-clean-2", "pre-android-1", "post-1"):
+            with open(os.path.join(d, "runs", f"{label}-summary.json"), "w") as f:
+                json.dump({"label": label}, f)
+        self.assertEqual([r["label"] for r in rr.load_runs(d, "pre")], ["pre-1", "pre-clean-2"])
+        self.assertEqual([r["label"] for r in cr.load(os.path.join(d, "runs"), "pre")], ["pre-1", "pre-clean-2"])
+        self.assertEqual([r["label"] for r in cr.load(os.path.join(d, "runs"), "pre-android")], ["pre-android-1"])
+
 class AndroidReadTest(unittest.TestCase):
     def test_android_hash_warning_counts(self):
         logs = [{"level": "WARNING", "category": "get-entity-id", "message": "Missing entity id, falling back to hash"},

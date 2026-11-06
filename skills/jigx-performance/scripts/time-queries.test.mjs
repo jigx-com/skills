@@ -94,3 +94,22 @@ test('a small query that gets much faster counts; sub-millisecond jitter does no
   const g = ms => [{kind: 'queries', where: 'a', ms_1x: 1, ms_nx: ms}];
   assert.equal(compareTimings(atScale(g(213)), atScale(g(2.1)))[0].verdict, 'faster');
 });
+
+test('a wrapped parameter (trim(@barcode)) is sampled from the other side', () => {
+  const s = sampleQueries("SELECT * FROM stock s WHERE trim(json_extract(s.data,'$.Code')) = trim(@barcode)");
+  assert.match(s.barcode, /SELECT trim\(json_extract\(s\.data,'\$\.Code'\)\) AS v FROM stock AS s/);
+  assert.ok(sampleQueries("SELECT * FROM stock s WHERE trim(COALESCE(@code, '')) = trim(s.id)").code);
+});
+
+test('NULL-parameter timings are not measurements; index names lose their quoting and count once', () => {
+  const before = {queries: [{where: 'a', ms: 2.5, rows: 0, unbound: ['barcode'], nullParams: true}, {where: 'b', ms: 9, rows: 3}]};
+  const after = {queries: [{where: 'a', ms: 0.1, rows: 0, unbound: ['barcode'], nullParams: true}, {where: 'b', ms: 1, rows: 3}]};
+  const rows = Object.fromEntries(compareTimings(before, after).map(r => [r.where, r.verdict]));
+  assert.equal(rows.a, 'not measured (NULL parameters)');
+  assert.equal(rows.b, 'faster');
+  assert.equal(growth(before, after, 10).find(r => r.where === 'a').verdict, 'not measured (NULL parameters)');
+  const step = sql => ({type: 'action.execute-sql', options: {statements: [{statement: sql}]}});
+  const app = {actions: {a: step('CREATE INDEX IF NOT EXISTS `idx_tasks_trim` ON [default/tasks] (trim(id))'),
+                         b: step('CREATE INDEX IF NOT EXISTS idx_tasks_trim ON [default/tasks] (trim(id))')}};
+  assert.deepEqual(collect(app).indexes.map(i => i.name), ['idx_tasks_trim']);
+});
