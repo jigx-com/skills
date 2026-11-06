@@ -33,8 +33,12 @@ Prefer an index to a rewrite, and ship it so a failure cannot go unnoticed. `scr
   answer `a = ? OR b = ?` with one index per arm (`MULTI-INDEX OR` in the plan), but one
   unindexed or non-matching arm turns the whole lookup into a scan. A header looked up by
   any of four ids, once per queued change, read every header row per change: seconds per
-  refresh at ~2,000 headers. Split it into one branch per key and index each branch's
-  exact expression:
+  refresh at ~2,000 headers. **First index every arm's exact expression and keep the
+  query**: read the plan, and `MULTI-INDEX OR` with one `SEARCH` per arm is the fix (one
+  review went 3.1 ms → 0 ms at 10x data with the query unchanged; a UNION rewrite there
+  was verified on 4,128 cases and then reverted as unnecessary). Only when the plan still
+  scans (an arm the planner cannot match to an index), split it into one branch per key
+  and index each branch's exact expression:
 
   ```sql
   SELECT h.id FROM [header] AS h WHERE trim(COALESCE(h.id, '')) = @key

@@ -20,7 +20,7 @@ change needs a builder option you have not seen in the project, check the `jigx`
 | `unindexed-predicate` | Add `CREATE INDEX IF NOT EXISTS idx_<table>_<field> ON [<table>] (<exact predicate text>)` to the index `execute-sql` step | Add `{ statement: "CREATE INDEX IF NOT EXISTS …" }` to the `statements` of the `executeSql({...})` index step |
 | `ddl-invalidates-datasources` | In the index step, `entities: [default/debug]` (a table nothing binds to), and gate each statement on its table existing | Same in `executeSql({ entities: ['default/debug'], ... })` |
 | `ddl-ungated` | Add `when:` reading `sqlite_master` for the table, or list the table in `entities:` | The same `when` on the action, or the table in `entities` |
-| `or-across-keys` | Split the `OR` into one `UNION` branch per key, each with a matching index, then join back for the existing tie-break | Same change inside `.query(\`…\`)`; add the missing indexes to `executeSql({...})` |
+| `or-across-keys` | Add an expression index on each arm's exact expression; the `OR` stays and the plan shows `MULTI-INDEX OR`. Split into one `UNION` branch per key only if the plan still scans | Add the indexes to `executeSql({...})`; the `.query(\`…\`)` stays |
 | `cte-join-no-index` | Join the table itself and move the CTE's expressions into `ON` and the select list; add the expression index if there is none; check the plan says `SEARCH` and the result is unchanged (`profile-query.py --compare`) | Same change inside `.query(\`…\`)`; the index in `executeSql({...})` |
 | `order-by-unindexed` | Index exactly the sort expression | Same, in the index step's `statements` |
 | `index-not-idempotent` | `CREATE INDEX IF NOT EXISTS` | Same, in the statement string |
@@ -35,7 +35,7 @@ is removed (`indexes-and-execute-sql.md`).
 | Finding | YAML | TypeScript SDK |
 | --- | --- | --- |
 | `per-row-datasource-read` | Move the read into the jig's `expressions:` (or the query: join it in SQL) and use `@ctx.current.item.<field>` in the item | Move it into `screen.addExpression('<name>', '=…')` or the query; the `listItem({...})` strings read `@ctx.current.item.<field>` |
-| `uncapped-search-list` | Add `LIMIT 200` and a `UNION` arm for the selected row (`query-shape-and-lists.md`) | Same change inside `.query(\`…\`)` |
+| `uncapped-search-list` | Add `LIMIT 200` and a `UNION` arm for the selected row (`query-shape-and-lists.md`), after checking every other read of the datasource (`[0]` defaults, reads of every id) and the table's real row count | Same change inside `.query(\`…\`)` |
 | `list-no-id` | Select a unique `id` column: `SELECT t.id AS id, …` | Same inside `.query(\`…\`)` |
 | `list-item-instance-id` | Delete `instanceId:` from the list item | Delete `instanceId` from the `listItem({...})` options |
 | `list-custom-component-item` | Replace the `component.custom-component` item with `component.list-item` (title, subtitle, tags, left/right elements) | Replace the custom component with `addControl.listItem({...})` plus `.addTag`, `.leftElement`, `.rightElement` |
