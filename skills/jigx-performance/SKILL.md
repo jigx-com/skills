@@ -45,8 +45,23 @@ the user; ask as little as possible.
      (`references/fixes-by-language.md`), applied only after the user agrees.
    - **Stop here**: the report is enough.
 
-**`/jigx-performance review [path]`**: go straight to "Review". **`/jigx-performance
-audit [path]`**: steps 1 and 2 above, no question.
+**`/jigx-performance review [path]`**: go straight to "Review".
+
+**Code check only: `/jigx-performance audit [path]`**, or the user asks for the audit
+alone ("just check the code", "audit only", "no simulator", "static check", "a quick
+check before I commit"). It needs no device, so do not mention devices or setup:
+
+1. Run `scripts/preflight.py --code-only <folder>` (no simulator or emulator is touched)
+   and show its lines: the solution, the **branch and commit** that will be audited, and
+   anything the audit itself needs (Node 18+; Ruby for YAML). Do not ask which branch:
+   the audit is read-only and takes seconds. Say "to audit another branch, check it out
+   and run it again".
+2. Step 2 above (the audit and `perf-review/before/audit.md`), with no plan or timing
+   questions. For SDK, run `jigx build` first when `build/output.json` is missing or
+   older than `src/`.
+3. End with one line, not a question: high and medium findings can be fixed as diffs
+   now ("fix the high findings"), and timing them needs a simulator or emulator
+   (`/jigx-performance review`). Only when the user picks one, continue there.
 
 **Never change the branch that is checked out.** The audit and timing are read-only.
 Approved fixes go on a new branch made from it (`perf/<short-name>`) or in a copy, and

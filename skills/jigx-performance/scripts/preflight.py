@@ -9,10 +9,13 @@ simulator, the Android SDK, a Google APIs emulator, the Jigx app, Node 22.5+, Ma
 Java 17+). It never installs or boots anything: Claude walks the user through the steps
 with references/device-setup.md and runs each command only after the user agrees.
 Run it before anything else and show the result to the user, so the branch and device are
-confirmed before any work starts. Prints JSON with --json. Read SKILL.md "Start".
+confirmed before any work starts. With --code-only (an audit with no device) it checks only
+the solution, the branch and what the audit needs (Node 18+, Ruby for YAML), and touches no
+simulator or emulator. Prints JSON with --json. Read SKILL.md "Start".
 
 Example:
   python3 preflight.py path/to/solution
+  python3 preflight.py --code-only path/to/solution
 """
 import argparse
 import glob
@@ -136,6 +139,23 @@ def tools():
             "brew": bool(shutil.which("brew"))}
 
 
+def audit_needs(sol):
+    """What the code-only audit needs: Node 18+, and Ruby to read a YAML folder."""
+    node = run(["node", "--version"]).strip()
+    m = re.match(r"v(\d+)", node)
+    missing = []
+    if not (m and int(m.group(1)) >= 18):
+        missing.append({"for": "audit", "problem": f"Node 18+ needed (have {node or 'none'})", "fix": "brew install node@22 (or: nvm install 22)"})
+    if sol["type"] == "YAML" and not shutil.which("ruby"):
+        missing.append({"for": "audit", "problem": "Ruby needed to read the YAML files", "fix": "brew install ruby"})
+    return missing
+
+
+def code_only(folder):
+    sol = solution(folder)
+    return {"folder": os.path.abspath(folder), "solution": sol, "git": git(folder), "audit_needs": audit_needs(sol)}
+
+
 def preflight(folder):
     mac = sys.platform == "darwin"
     booted, shutdown, runtimes = ios() if mac else ([], [], [])
@@ -225,11 +245,24 @@ def setup_steps(r):
     return steps
 
 
-def text(r):
+def head(r):
     s, g = r["solution"], r["git"]
     lines = [f"Solution: {s['name'] or '?'} ({s['type'] or 'no index.jigx or src/app.ts here'}) in {r['folder']}"]
     lines.append(f"Branch: {g['branch']} at {g['commit']}" + (f", {g['uncommitted']} uncommitted change(s)" if g["uncommitted"] else ", clean")
                  if g else "Branch: not a git checkout")
+    return lines
+
+
+def code_only_text(r):
+    lines = head(r)
+    needs = r["audit_needs"]
+    lines.append("Audit needs: " + ("nothing missing (code check only: no simulator or emulator)" if not needs else
+                                    "; ".join(f"{n['problem']}, fix: {n['fix']}" for n in needs)))
+    return "\n".join(lines)
+
+
+def text(r):
+    lines = head(r)
     devices = [f"iOS {d['name']} ({d['runtime']}): " + (", ".join(d["jigx_apps"]) or "no Jigx app installed") for d in r["ios"]]
     devices += [f"Android {d['model']} {d['serial']}" + (" emulator" if d["emulator"] else " phone") + ": "
                 + (", ".join(d["jigx_apps"]) or "no Jigx app installed")
@@ -248,7 +281,12 @@ def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("folder", nargs="?", default=".")
     p.add_argument("--json", action="store_true")
+    p.add_argument("--code-only", action="store_true", help="solution, branch and audit needs only; no device checks")
     args = p.parse_args(argv)
+    if args.code_only:
+        r = code_only(args.folder)
+        print(json.dumps(r, indent=2) if args.json else code_only_text(r))
+        return 0
     r = preflight(args.folder)
     if args.json:
         r["setup"] = setup_steps(r)

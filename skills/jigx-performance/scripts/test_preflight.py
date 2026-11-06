@@ -88,6 +88,34 @@ class PreflightTest(unittest.TestCase):
         finally:
             pf.run = orig
 
+    def test_code_only_touches_no_device(self):
+        d = tempfile.mkdtemp()
+        with open(os.path.join(d, "index.jigx"), "w") as f:
+            f.write("name: demo\n")
+        calls, orig = [], pf.run
+        def fake(cmd, cwd=None, stderr=False):
+            calls.append(cmd[0])
+            return "v22.16.0" if cmd[0] == "node" else ""
+        try:
+            pf.run = fake
+            r = pf.code_only(d)
+        finally:
+            pf.run = orig
+        self.assertNotIn("xcrun", calls)
+        self.assertNotIn("adb", " ".join(calls))
+        self.assertEqual(r["solution"]["type"], "YAML")
+        out = pf.code_only_text(r)
+        self.assertNotIn("Devices", out)
+        self.assertIn("Branch: not a git checkout", out)
+
+    def test_code_only_old_node(self):
+        orig = pf.run
+        try:
+            pf.run = lambda cmd, cwd=None, stderr=False: "v16.20.0" if cmd[0] == "node" else ""
+            needs = pf.audit_needs({"type": "SDK", "name": "x"})
+        finally:
+            pf.run = orig
+        self.assertIn("Node 18+", needs[0]["problem"])
 
 def android_steps(r):
     return [s for s in pf.setup_steps(r) if s["for"] == "Android"]

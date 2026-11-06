@@ -29,7 +29,10 @@ Claude:
    - **Stop here**
 
 Shortcuts: `/jigx-performance review` goes straight to "time it and fix it";
-`/jigx-performance audit` only audits. Nothing in your solution changes until you
+`/jigx-performance audit` (or "just check the code") is a **code check only**: no
+simulator, emulator or setup, only Node (and Ruby for YAML folders). It shows the branch
+it audits, lists the findings in seconds and stops; you can still ask for the fixes or
+the timing afterwards. Nothing in your solution changes until you
 approve it, approved fixes go on a new branch (never the one you have checked out), and
 nothing is ever published to or timed against production.
 
