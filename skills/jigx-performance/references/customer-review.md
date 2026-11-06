@@ -23,13 +23,19 @@ Confirm with the user, once:
   (branded apps need `targetAppName`). Never publish to or time against production or a
   working user's phone
 - the journeys to time: the sign-in sync (always), the cold start, and the screens
-  users open most (3–6, e.g. the main list, a detail screen, a form)
+  users open most (3–6, e.g. the main list, a detail screen, a form), each on the record
+  with the most rows for it (the project with the most photos, drawings and notes, the
+  busiest customer): a screen opened on an empty record times nothing
 - the platforms: iOS Simulator and Android (an emulator; a Google APIs image for sync
   timing). Time both when the customer's users have both; run one at a time
 - realistic test data: a load that is fast because the test user has ten rows proves
   nothing
 
-Work on a branch in the customer repo. Commit nothing until the user approves changes.
+Work on a branch in the customer repo, made without touching the checkout: `git worktree
+add ../<repo>-perf -b perf/<short-name>` gives a separate folder on a new branch, and the
+user's checkout and its uncommitted changes stay as they are. `copy-to-test.py` finds the
+Builder settings (`.vscode/settings.json`, usually not committed) in the main checkout when
+it runs in a worktree. Commit nothing until the user approves changes.
 
 ## 1. Audit
 
@@ -135,8 +141,10 @@ For each approved section, in order:
 - add a `check-plans.py` guard for each per-row or per-change lookup you fixed
 - append each change to `<review>/changes.json` as
   `{"section": "B", "change": "Index orders by reference", "files": ["actions/create-indexes.jigx"]}`
-- rebuild (SDK: `jigx build`) and run the `jigx` runtime checker; stop and report if it
-  fails
+- check it still loads, and stop and report if it does not. SDK: `jigx build`, then the `jigx`
+  runtime checker (`check-runtime.mjs` reads `build/output.json` only). YAML has no build: run
+  the audit again and check it reports no `parseErrors`, and parse every expression you changed
+  with jsonata (each `=` value must parse)
 
 Then audit again, publish to the same test solution and repeat every timing from step 2
 with the same journeys, data and simulator:

@@ -64,8 +64,10 @@ check before I commit"). It needs no device, so do not mention devices or setup:
    (`/jigx-performance review`). Only when the user picks one, continue there.
 
 **Never change the branch that is checked out.** The audit and timing are read-only.
-Approved fixes go on a new branch made from it (`perf/<short-name>`) or in a copy, and
-you say which before the first change.
+Approved fixes go on a new branch made from it (`perf/<short-name>`) in a separate
+worktree (`git worktree add ../<repo>-perf -b perf/<short-name>`, so the checkout and its
+uncommitted changes are never touched) or in a copy, and you say which before the first
+change.
 
 **Timing needs a device; set it up with the user, do not skip it.** Before any timing
 step, rerun `preflight.py`. When it lists setup steps, or "set up a device first" was

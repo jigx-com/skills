@@ -117,6 +117,13 @@ class PreflightTest(unittest.TestCase):
             pf.run = orig
         self.assertIn("Node 18+", needs[0]["problem"])
 
+    def test_installed_java_17_is_pointed_at_not_reinstalled(self):
+        r = report(tools={"java": 11, "java_ok": False, "java_home_17": "/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home"})
+        step = [s for s in pf.setup_steps(r) if "Java" in s["problem"]][0]
+        self.assertIn("installed but not used", step["problem"])
+        self.assertIn('export JAVA_HOME="/opt/homebrew/opt/openjdk@17', step["fix"])
+        self.assertNotIn("brew install", step["fix"])
+
 def android_steps(r):
     return [s for s in pf.setup_steps(r) if s["for"] == "Android"]
 

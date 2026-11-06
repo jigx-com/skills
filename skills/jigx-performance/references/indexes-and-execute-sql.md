@@ -146,6 +146,12 @@ these as `cte-join-no-index`.
 
   `check-plans.py` and the audit skip `sqlite_master` and other `sqlite_*` tables.
 
+  **Run the index action again at the end of the initial sync.** On a fresh install the
+  start-up run (`onLoad`) comes before the initial sync has created the tables, so every gate
+  is false and no index is built until the next start. Call the same index action as the
+  last step of the initial sync (after its scopes finish); `IF NOT EXISTS` makes the second
+  run a no-op where the indexes already exist.
+
 - **Keep new statements in a separate step** from proven ones, so a failure cannot drop indexes that
   already work.
 - **Keep table creation out of the index step.** A `CREATE TABLE` must name its real entity so

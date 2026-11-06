@@ -41,5 +41,13 @@ class CopyToTestTest(unittest.TestCase):
             ct.copy_to_test(self.src, os.path.join(self.root, "copy"), "Field-Services")
 
 
+    def test_settings_from_the_main_checkout_of_a_worktree(self):
+        wt = tempfile.mkdtemp()
+        os.makedirs(os.path.join(self.root, ".git", "worktrees", "perf"))
+        with open(os.path.join(wt, ".git"), "w") as f:
+            f.write(f"gitdir: {os.path.join(self.root, '.git', 'worktrees', 'perf')}\n")
+        os.makedirs(os.path.join(wt, "Solution"))
+        self.assertEqual(ct.find_settings(os.path.join(wt, "Solution")), os.path.join(self.root, ".vscode", "settings.json"))
+
 if __name__ == "__main__":
     unittest.main()

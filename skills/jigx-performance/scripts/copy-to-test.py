@@ -32,16 +32,41 @@ def set_top_level(text, key, value):
     return f"{line}\n{text}"
 
 
-def find_settings(folder):
-    """The nearest .vscode/settings.json in the folder or above it, up to the repository root."""
+def find_settings(folder, _main=True):
+    """The nearest .vscode/settings.json in the folder or above it, up to the repository root.
+    In a git worktree (.git is a file) the settings are usually not committed, so the same
+    place in the main checkout is searched too."""
     d = os.path.abspath(folder)
     while True:
         path = os.path.join(d, ".vscode", "settings.json")
         if os.path.exists(path):
             return path
-        if os.path.exists(os.path.join(d, ".git")) or os.path.dirname(d) == d:
+        git = os.path.join(d, ".git")
+        if os.path.isfile(git) and _main:
+            main = main_checkout(git)
+            if main:
+                return find_settings(os.path.join(main, os.path.relpath(os.path.abspath(folder), d)), _main=False)
+            return None
+        if os.path.exists(git) or os.path.dirname(d) == d:
             return None
         d = os.path.dirname(d)
+
+
+def main_checkout(git_file):
+    """The main checkout of a worktree: its .git file says gitdir: <main>/.git/worktrees/<name>."""
+    try:
+        with open(git_file, encoding="utf-8") as f:
+            m = re.match(r"gitdir:\s*(.+)", f.read().strip())
+    except OSError:
+        return None
+    if not m:
+        return None
+    gitdir = os.path.normpath(os.path.join(os.path.dirname(git_file), m.group(1)))
+    parts = gitdir.split(os.sep)
+    if "worktrees" in parts:
+        common = os.sep.join(parts[:len(parts) - 1 - parts[::-1].index("worktrees")])
+        return os.path.dirname(common)
+    return None
 
 
 def copy_to_test(src, out, name, title=None):

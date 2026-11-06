@@ -132,11 +132,36 @@ def tools():
     m = re.match(r"v(\d+)\.(\d+)", node)
     maestro = shutil.which("maestro") or (os.path.expanduser("~/.maestro/bin/maestro") if os.path.exists(os.path.expanduser("~/.maestro/bin/maestro")) else None)
     # /usr/bin/java on macOS is a stub that exists even with no JDK installed.
-    jv = re.search(r'version "(\d+)(?:\.(\d+))?', run(["java", "-version"], stderr=True))
-    java = None if not jv else (int(jv.group(2)) if jv.group(1) == "1" else int(jv.group(1)))
+    java = java_version(run(["java", "-version"], stderr=True))
+    ok = bool(java) and java >= 17
     return {"node": node or None, "node_ok": bool(m) and (int(m.group(1)), int(m.group(2))) >= (22, 5),
-            "maestro": bool(maestro), "java": java, "java_ok": bool(java) and java >= 17,
+            "maestro": bool(maestro), "java": java, "java_ok": ok,
+            # A Java 17+ that is installed but not the one on the path (Homebrew's openjdk is keg-only,
+            # and a JAVA_HOME pinned in ~/.zshrc wins): point JAVA_HOME at it instead of installing.
+            "java_home_17": None if ok else installed_java_17(),
             "brew": bool(shutil.which("brew"))}
+
+
+def java_version(text):
+    jv = re.search(r'version "(\d+)(?:\.(\d+))?', text)
+    return None if not jv else (int(jv.group(2)) if jv.group(1) == "1" else int(jv.group(1)))
+
+
+def installed_java_17():
+    """A JDK 17 or newer home on this Mac that is not the active java, if there is one."""
+    homes = []
+    out = run(["/usr/libexec/java_home", "-V"], stderr=True)
+    homes += re.findall(r'^\s*(\d+)[^\n]*?(/\S+/Contents/Home)\s*$', out, re.M)
+    prefix = run(["brew", "--prefix"]).strip() or "/opt/homebrew"
+    for keg in ("openjdk@17", "openjdk@21", "openjdk"):
+        home = os.path.join(prefix, "opt", keg, "libexec", "openjdk.jdk", "Contents", "Home")
+        java = os.path.join(home, "bin", "java")
+        if os.path.exists(java):
+            v = java_version(run([java, "-version"], stderr=True))
+            if v:
+                homes.append((str(v), home))
+    good = [h for v, h in homes if int(v) >= 17]
+    return good[0] if good else None
 
 
 def audit_needs(sol):
@@ -192,7 +217,11 @@ def setup_steps(r):
             '/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"')
     if not t["node_ok"]:
         add("query timing", f"Node 22.5+ needed (have {t['node'] or 'none'})", "brew install node@22 (or: nvm install 22)")
-    if not t["java_ok"]:
+    if not t["java_ok"] and t.get("java_home_17"):
+        add("screen timing", f"Java 17+ is installed but not used (the active java is {t['java'] or 'none'}; "
+            "a JAVA_HOME in ~/.zshrc may pin the old one)",
+            f'export JAVA_HOME="{t["java_home_17"]}" PATH="{t["java_home_17"]}/bin:$PATH" (and fix the JAVA_HOME line in ~/.zshrc to keep it)')
+    elif not t["java_ok"]:
         add("screen timing", f"Java 17+ needed for Maestro (have {t['java'] or 'none'})",
             "brew install openjdk@17, then: export JAVA_HOME=$(/usr/libexec/java_home -v 17)")
     if not t["maestro"]:
