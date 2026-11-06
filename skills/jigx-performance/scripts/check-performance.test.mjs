@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {spawnSync} from 'node:child_process';
-import {checkPerformance, cteJoins, filterPredicates, parseCreateIndex, normaliseExpr, loadSolution, markdownReport, newFindings, orAcrossKeys, orderByTerms, outerColumns, riskyCalls, scriptFunctions, sdkSources, shorthandPaths, where} from './check-performance.mjs';
+import {RULES, checkPerformance, cteJoins, filterPredicates, parseCreateIndex, normaliseExpr, loadSolution, markdownReport, newFindings, orAcrossKeys, orderByTerms, outerColumns, riskyCalls, scriptFunctions, sdkSources, shorthandPaths, where} from './check-performance.mjs';
 
 // Fixtures are minimal (no id, rewriteQuery on, loose entities); those checks have their own tests.
 const NOISE = new Set(['unused-datasource', 'rewrite-query-on', 'datasource-no-id', 'watched-table-unread', 'order-by-unindexed']);
@@ -310,7 +310,7 @@ test('sync behaviour: handlers, double scheduling, sequential calls, file transf
   // The screen re-runs the sync the app runs on start: a full sync on every tab switch.
   const focus = checkPerformance({...app, onLoad: run('load')}).findings.find(f => f.code === 'heavy-focus');
   assert.equal(focus.priority, 'high');
-  assert.match(focus.message, /the same load the app runs on start/);
+  assert.match(focus.message, /load is the same sync the app runs on start/);
 });
 
 test('expressions: many datasource filters in one expression; solution state in a global datasource', () => {
@@ -398,4 +398,81 @@ test('a join on columns a CTE computes from one table is found; direct joins and
   assert.deepEqual(cteJoins(chain).map(c => `${c.cte}:${c.columns.join('+')}:${c.table}`), ['offs:nbr:headers']);
   const app = {datasources: {opps: {type: 'datasource.sqlite', options: {entities: ['opportunities'], query: q}}}};
   assert.ok(checkPerformance(app).findings.some(f => f.code === 'cte-join-no-index'));
+});
+
+test('filter-inside-map sees only the $map function body', async () => {
+  const {mapBodies} = await import('./check-performance.mjs');
+  const after = "$merge([{'Products': $map(@ctx.datasources.deleted, function($v){ {'id': $v.id} })}, $count(@ctx.datasources.details[x = 1]) = 0 ? {} : {}])";
+  assert.equal(mapBodies(after).some(b => /@ctx\.datasources\.[\w-]+\s*\[/.test(b)), false);
+  const inside = "$map(@ctx.datasources.logs, function($l){ @ctx.datasources.employees[id = $l.emp][0].name })";
+  assert.equal(mapBodies(inside).some(b => /@ctx\.datasources\.[\w-]+\s*\[/.test(b)), true);
+  const nextLine = "($c := $map($parts, function($p){ $trim($p) }); $crew := @ctx.datasources.staff[nbr = 1].name)";
+  assert.equal(mapBodies(nextLine).some(b => /@ctx\.datasources\.[\w-]+\s*\[/.test(b)), false);
+});
+
+test('per-row reads skip tap handlers and rise to high with 4+ filters per row', () => {
+  const tap = {type: 'component.list-item', options: {title: '=@ctx.current.item.name',
+    onPress: {type: 'action.go-to', options: {parameters: {x: '=@ctx.datasources.details[id=@ctx.current.item.id].x'}}},
+    swipeable: {left: [{label: 'Delete', onPress: {type: 'action.execute-entity', options: {data: '=@ctx.datasources.files[id=1]'}}}]}}};
+  assert.deepEqual(codes({jigs: {list: {item: tap}}}), []);
+  const heavy = {type: 'component.list-item', options: {
+    title: '=$count(@ctx.datasources.photos[log=@ctx.current.item.id]) & " " & $count(@ctx.datasources.photos[log=@ctx.current.item.id and done])',
+    subtitle: '=@ctx.datasources.photos[log=@ctx.current.item.id][0].name & @ctx.datasources.photos[log=@ctx.current.item.id][-1].name'}};
+  const f = checkPerformance({jigs: {list: {item: heavy}}}).findings.find(x => x.code === 'per-row-datasource-read');
+  assert.equal(f.priority, 'high');
+  assert.match(f.message, /4 datasource filters per row/);
+});
+
+test('a fixed non-date filter is a full pull; one-record calls need no $select; heavy-focus names the syncing action', () => {
+  const sync = entities => ({type: 'action.sync-entities', options: {entities}});
+  const app = {
+    functions: {'get-projects': {method: 'GET', url: 'https://{u}Project', parameters: {$filter: {location: 'query'}, $expand: {location: 'query'}}},
+                'whoami': {method: 'GET', url: 'https://{u}Employee', parameters: {$filter: {location: 'query'}, $expand: {location: 'query'}}}},
+    actions: {
+      s: {action: sync([{entity: 'default/projects', function: 'get-projects', parameters: {$filter: "Status eq 'Active'"}},
+                        {entity: 'default/me', function: 'whoami', parameters: {$filter: '="LoginName eq \'" & @ctx.action.parameters.user & "\'"'}}])},
+      'sync-appts': {action: sync([{entity: 'default/appts', function: 'get-projects'}])},
+      wrap: {action: {type: 'action.action-list', options: {actions: [{type: 'action.execute-action', options: {action: 'sync-appts'}},
+                                                                     {type: 'action.execute-action', options: {action: 'action-logout'}}]}}},
+      'action-logout': {action: {type: 'action.set-state', options: {state: '=@ctx.solution.state.x', value: 1}}},
+    },
+    jigs: {list: {type: 'jig.default', onFocus: {type: 'action.execute-action', options: {action: 'wrap'}}}},
+    datasources: {p: ds('SELECT * FROM [default/projects] JOIN [default/me] JOIN [default/appts]', ['default/projects', 'default/me', 'default/appts'])},
+  };
+  const f = checkPerformance(app).findings;
+  const full = f.filter(x => x.code === 'sync-full-pull').map(x => x.message);
+  assert.ok(full.some(m => /^projects .*does not compare a modified date/.test(m)));
+  assert.ok(!full.some(m => /^me /.test(m)));
+  assert.ok(!f.some(x => x.code === 'sync-no-select' && /whoami/.test(x.message)));
+  const focus = f.find(x => x.code === 'heavy-focus');
+  assert.match(focus.message, /\(sync-appts\)/);
+  assert.doesNotMatch(focus.message, /logout|full/);
+});
+
+test('sequential-sync-steps follows execute-action: onLoad calling sync actions in series', () => {
+  const sync = e => ({action: {type: 'action.sync-entities', options: {entities: [e]}}});
+  const call = name => ({type: 'action.execute-action', options: {action: name}});
+  const app = {
+    actions: {issues: sync('issues'), transfers: sync('transfers'), pos: sync('pos'), whs: {action: {type: 'action.action-list', options: {actions: [call('pos')]}}},
+              logout: {action: {type: 'action.set-state', options: {state: '=@ctx.solution.state.x', value: 1}}}},
+    onLoad: {type: 'action.action-list', options: {isSequential: true, actions: [call('issues'), call('transfers'), call('whs'), call('logout')]}},
+  };
+  const f = checkPerformance(app).findings.find(x => x.code === 'sequential-sync-steps');
+  assert.ok(f, 'flagged');
+  assert.match(f.message, /3 sync steps run one after another \(issues, transfers, whs\)/);
+  assert.match(RULES['sequential-sync-steps'].fix, /write the same table/);
+});
+
+test('expression safety: bracketed guards count, keys are low, and the report gives them their own block', () => {
+  assert.deepEqual(riskyCalls("=((@ctx.current.item.Date) ? $substring(@ctx.current.item.Date, 0, 16) :'')"), []);
+  assert.equal(riskyCalls("=($exists(@ctx.current.item.Date) ? $substring(@ctx.current.item.Date, 0, 16) :'')").length, 1);
+  const list = (title) => ({type: 'jig.list', data: '=@ctx.datasources.rows', item: {type: 'component.list-item', options: {title}}});
+  const grade = title => checkPerformance({jigs: {l: list(title)}}).findings.find(f => f.code === 'expression-may-throw')?.priority;
+  assert.equal(grade('=$trim(@ctx.current.item.AppointmentNbr)'), 'low');
+  assert.equal(grade('=$trim(@ctx.current.item.Description)'), 'medium');
+  const findings = checkPerformance({jigs: {l: list('=$trim(@ctx.current.item.Description)')}}).findings;
+  const md = markdownReport({title: 'sol', findings});
+  assert.match(md, /^\*\*0 high · 0 medium · \d+ low\*\* · 1 expression-safety findings/m);
+  assert.match(md, /## Expression safety \(1: 1 medium, 0 low\)/);
+  assert.doesNotMatch(md, /### expression-may-throw/);
 });

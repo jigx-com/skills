@@ -301,6 +301,21 @@ def entry_timings(samples, armed):
     return dict(sorted(out.items(), key=lambda kv: (kv[1]["start_s"], kv[0])))
 
 
+def serial_chain(entries, slack=0.3):
+    """The longest run of entries where each starts only after the one before it ended (within
+    one sample): calls in strict series, which a parallel wave could overlap."""
+    done = sorted((e["start_s"], e["end_s"], n) for n, e in entries.items() if e["end_s"] is not None)
+    best, cur = [], []
+    for start, end, name in done:
+        if cur and start >= cur[-1][1] - slack:
+            cur.append((start, end, name))
+        else:
+            cur = [(start, end, name)]
+        if len(cur) > len(best):
+            best = list(cur)
+    return [n for _, _, n in best] if len(best) >= 4 else []
+
+
 def waterfall(entries, width=40):
     ends = [e["end_s"] for e in entries.values() if e["end_s"] is not None]
     span = max(ends or [1]) or 1
@@ -454,6 +469,7 @@ def summarise(label, db, samples, result, armed, ready_at, logs, final, scopes):
                          "first_duration_s": first_sync_s(runs.get(sid), paused_spans(samples, armed, sid))}
                    for sid, v in run.items() if v},
         "entries": entries,
+        "serial_entries": serial_chain(entries),
         "slowest_entries": sorted(((n, e["duration_s"]) for n, e in entries.items() if e["duration_s"] is not None),
                                   key=lambda x: -x[1])[:10],
         "final_counts": final["counts"] if final else {},
@@ -558,6 +574,10 @@ def track(db, label, out, tables=(), scopes=(), interval=0.25, settle=5.0, timeo
     print("\n".join(["", f"{label}: {result}, first start to ready {'n/a' if total is None else f'{total}s'}", ""]
                     + waterfall(summary["entries"])), file=stream)
     print(f"Sync busy {summary['sync_busy_s']}s, {sum(summary['scope_starts'].values())} scope start(s)", file=stream)
+    if summary["serial_entries"]:
+        print(f"{len(summary['serial_entries'])} calls ran strictly one after another: "
+              f"{', '.join(summary['serial_entries'][:6])}{' …' if len(summary['serial_entries']) > 6 else ''}; "
+              "if they do not read each other's tables they can run in one wave", file=stream)
     if summary["interrupted_s"]:
         print(f"Interrupted (e.g. the login page) {summary['interrupted_s']}s, not counted; "
               f"first start to ready with it: {summary['first_start_to_ready_raw_s']}s", file=stream)

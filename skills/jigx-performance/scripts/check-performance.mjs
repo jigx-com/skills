@@ -133,23 +133,28 @@ export function riskyCalls(expr) {
     // A component value can be a number or object, so only a type check guards it; a NULL
     // column is guarded by any condition on it (null is falsy).
     const typed = new RegExp(`\\$type\\(\\s*${esc}\\s*\\)`).test(e);
-    // $exists(null) is true, so $exists is not a guard.
-    const tested = new RegExp(`${esc}\\s*(\\?|\\band\\b|\\bor\\b|!=|=|>|<)`).test(e.replace(m[0], ''));
+    // $exists(null) is true, so $exists is not a guard. Closing brackets may sit between the value
+    // and the test: (x) ? …, $boolean(x) ? …, $string(x) != '' and … guard it too.
+    const rest = e.replace(m[0], '').replace(new RegExp(`\\$exists\\(\\s*${esc}\\s*\\)`, 'g'), '');
+    const tested = new RegExp(`${esc}(?:\\s*\\))*\\s*(\\?|\\band\\b|\\bor\\b|!=|=|>|<)`).test(rest);
     if (typed || (!ref.includes('.components.') && tested)) continue;
     out.push({fn, ref});
   }
   return out;
 }
 
-function mapBodies(expr) {
+// The function argument of each $map call: from its first top-level comma to the call's own
+// closing parenthesis (not the rest of the expression, so a filter after the $map is not "inside" it).
+export function mapBodies(expr) {
   const out = [];
   for (const m of expr.matchAll(/\$map\s*\(/g)) {
-    let depth = 0;
+    let depth = 0, comma = -1;
     for (let i = m.index + m[0].length; i < expr.length; i++) {
       const c = expr[i];
       if ('([{'.includes(c)) depth++;
-      else if (')]}'.includes(c)) { if (depth-- === 0) break; }
-      else if (c === ',' && depth === 0) { out.push(expr.slice(i + 1)); break; }
+      else if (')]}'.includes(c)) {
+        if (depth-- === 0) { if (comma >= 0) out.push(expr.slice(comma + 1, i)); break; }
+      } else if (c === ',' && depth === 0 && comma < 0) comma = i;
     }
   }
   return out;
@@ -391,7 +396,7 @@ export const RULES = {
   'heavy-expression': {priority: 'medium', section: 'D', fix: 'Filter once: bind the datasource rows to a variable ($rows := …) or move the counts into the SQL, then reuse the result.'},
   'solution-state-in-global-datasource': {priority: 'medium', section: 'D', fix: 'Pass the value from the screen instead; a global datasource re-runs for everyone whenever solution state changes (ST-02).'},
   'solution-state-in-handler': {priority: 'low', section: 'D', fix: 'Each write re-evaluates every expression that reads solution state; write only when the value changes, or keep it in jig state (ST-01).'},
-  'expression-may-throw': {priority: 'medium', section: 'D', fix: "Guard the value (tested guards in jigx jsonata-validation-formatting.md): `x ? $trim($string(x)) :''` for a component value (in YAML use a block value `|`, or no space after the colon: `: ` ends a plain value), COALESCE the column in the SQL, ISO 8601 dates from SQL (or a matching picture) before $toMillis, and a $type check before $match and $number. $exists does not guard null."},
+  'expression-may-throw': {priority: 'medium', section: 'D', fix: "Guard the value (tested guards in jigx jsonata-validation-formatting.md): `x ? $trim($string(x)) :''` for a component value (in YAML use a block value `|`, or no space after the colon: `: ` ends a plain value), COALESCE the column in the SQL, ISO 8601 dates from SQL (or a matching picture) before $toMillis, and a $type check before $match and $number. When the guarded value feeds another call ($fromMillis, arithmetic), return () instead of null in the empty branch: `$fromMillis(v ? $toMillis(v) :())`. $exists does not guard null."},
   'script-console-log': {priority: 'medium', section: 'H', fix: 'Remove console.log from expression functions; each call writes to the device log.'},
   'simple-script-function': {priority: 'low', section: 'D', fix: 'Write it as a JSONata expression (built-ins like $formatNumber, $substringBefore, $boolean, object lookups); keep JavaScript for logic JSONata cannot express clearly.'},
   'unused-script-function': {priority: 'low', section: 'E', fix: 'Delete it; the script ships and loads with the solution.'},
@@ -425,6 +430,19 @@ export function where(path, sources = {}) {
 
 // stats: optional {table: {rows, bytes}} from a device database (tableStats), to size sync findings.
 export function checkPerformance(app, {stats = null, sources = {}} = {}) {
+  // Whether an action syncs, itself or through the actions it calls (three levels).
+  const actionSyncs = (name, depth = 0, seen = new Set()) => {
+    const def = app.actions?.[name];
+    if (!def || depth > 3 || seen.has(name)) return false;
+    seen.add(name);
+    let hit = false;
+    walk(def, v => {
+      if (hit || !v || typeof v !== 'object') return false;
+      if (v.type === 'action.sync-entities') { hit = true; return false; }
+      if (v.type === 'action.execute-action' && typeof v.options?.action === 'string' && actionSyncs(v.options.action, depth + 1, seen)) hit = true;
+    });
+    return hit;
+  };
   sources = {...sources}; // script functions add their own locations
   const findings = [];
   const add = (code, path, message, {severity = 'warning', priority} = {}) => findings.push({
@@ -455,8 +473,14 @@ export function checkPerformance(app, {stats = null, sources = {}} = {}) {
     if (/^action\.execute-entit(y|ies)$/.test(node.type) && /download|upload/i.test(node.options?.method ?? '') && !node.options?.processingType)
       add('file-transfer-sequential', path, `A file ${node.options.method} runs with the default sync processing, so it blocks the commands queued behind it.`);
     if (node.type === 'action.action-list' && node.options?.isSequential) {
-      const n = asArray(node.options.actions).filter(a => a?.type === 'action.sync-entities').length;
-      if (n >= 4) add('sequential-sync-steps', path, `${n} sync calls run one after another; network waits add up.`);
+      // A step syncs when it is a sync-entities, or an execute-action whose action syncs (up to
+      // three levels): onLoad usually calls sync actions by name, one after another.
+      const steps = asArray(node.options.actions);
+      const direct = steps.filter(a => a?.type === 'action.sync-entities').length;
+      const called = steps.filter(a => a?.type === 'action.execute-action' && a.when === undefined && actionSyncs(a.options?.action)).map(a => a.options.action);
+      const n = direct + called.length;
+      if (n >= 4 || called.length >= 3) add('sequential-sync-steps', path,
+        `${n} sync steps run one after another${called.length ? ` (${called.join(', ')})` : ''}; network waits add up.`);
     }
     if (node.type === 'action.set-state' && /^=?\s*@ctx\.solution\.state\./.test(String(node.options?.state ?? '')) && path.startsWith('$.onTableChanged.'))
       add('solution-state-in-handler', path, `A table-change handler writes ${String(node.options.state).replace(/^=\s*/, '')}.`);
@@ -473,13 +497,20 @@ export function checkPerformance(app, {stats = null, sources = {}} = {}) {
     // Only a list's item: template renders per row; a list-item placed on its own renders once.
     if (node.type === 'component.list-item' && /\.item$/.test(path)) {
       const reads = new Set();
-      walk(node, value => {
+      let filters = 0;
+      walk(node, (value, p) => {
+        // An action handler (onPress, a swipe button's onPress) runs on a tap, not per rendered row.
+        if (/\.on[A-Z]\w*$/.test(p)) return false;
         if (typeof value === 'string' && value.startsWith('=')) {
-          for (const r of withoutJsonataStrings(value).matchAll(/@ctx\.datasources\.([\w-]+)/g)) reads.add(r[1]);
+          const expr = withoutJsonataStrings(value);
+          for (const r of expr.matchAll(/@ctx\.datasources\.([\w-]+)/g)) reads.add(r[1]);
+          filters += (expr.match(/@ctx\.datasources\.[\w-]+\s*\[/g) ?? []).length;
         }
       });
       if (reads.size) add('per-row-datasource-read', path,
-        `List item reads ${[...reads].join(', ')} per rendered row (one live subscription each).`);
+        `List item reads ${[...reads].join(', ')} per rendered row (one live subscription each)` +
+        (filters >= 4 ? `, with ${filters} datasource filters per row.` : '.'),
+        filters >= 4 ? {priority: 'high'} : {});
       return;
     }
     for (const [key, value] of Object.entries(node)) {
@@ -506,6 +537,8 @@ export function checkPerformance(app, {stats = null, sources = {}} = {}) {
     if (ref.includes('.components.') || /^(toMillis|fromMillis)$/.test(fn)) return 'medium';
     const col = ref.split('.').pop();
     if (/^id$/i.test(col)) return null;
+    // A key column (an order number, a code, a foreign id) is set on every synced row: low.
+    const key = /(?:id|nbr|number|code|cd|key|no)$/i.test(col) && !/^(?:void|paid|valid|hidden)$/i.test(col);
     let ds;
     if (ref.startsWith('@ctx.current.item.')) ds = [...listItems].filter(([p]) => at.startsWith(p)).pop()?.[1];
     else {
@@ -514,7 +547,7 @@ export function checkPerformance(app, {stats = null, sources = {}} = {}) {
       ds = (owner && app[owner[1]]?.[owner[2]]?.datasources?.[name]) ?? app.datasources?.[name];
     }
     if (ds?.type === 'datasource.sqlite' && typeof ds.options?.query === 'string' && /^\s*(\w+\s*\(\s*)*(COALESCE|IFNULL)\s*\(/i.test(columnExpr(ds.options.query, col) ?? '')) return null;
-    return ref.startsWith('@ctx.current.item.') ? 'medium' : 'low';
+    return ref.startsWith('@ctx.current.item.') && !key ? 'medium' : 'low';
   }
 
   function checkList(node, path) {
@@ -665,15 +698,19 @@ export function checkPerformance(app, {stats = null, sources = {}} = {}) {
 
   // onFocus runs every time the screen is shown. Unguarded sync steps reached from it, through
   // execute-action up to three levels: how many entities they sync and which actions they run.
-  const focusSyncs = (node, depth = 0, out = {entities: 0, actions: new Set()}) => {
+  const focusSyncs = (node, depth = 0, out = {entities: 0, actions: new Set(), syncers: new Set()}, owner = null) => {
     walk(node, v => {
       if (!v || typeof v !== 'object') return false;
       if (v.when !== undefined && v !== node) return false; // a guarded branch is fine
-      if (v.type === 'action.sync-entities') { out.entities += Math.max(1, asArray(v.options?.entities).length); return false; }
+      if (v.type === 'action.sync-entities') {
+        out.entities += Math.max(1, asArray(v.options?.entities).length);
+        if (owner) out.syncers.add(owner); // the action that syncs, not a wrapper or a logout next to it
+        return false;
+      }
       const target = v.type === 'action.execute-action' && v.options?.action;
       if (typeof target === 'string' && depth < 3 && !out.actions.has(target) && app.actions?.[target]) {
         out.actions.add(target);
-        focusSyncs(app.actions[target].action ?? app.actions[target], depth + 1, out);
+        focusSyncs(app.actions[target].action ?? app.actions[target], depth + 1, out, target);
       }
     });
     return out;
@@ -684,11 +721,13 @@ export function checkPerformance(app, {stats = null, sources = {}} = {}) {
     if (!jig?.onFocus || jig.onFocus.when !== undefined) continue;
     const f = focusSyncs(jig.onFocus);
     if (!f.entities) continue;
-    const again = [...f.actions].filter(a => startActions.has(a));
-    const full = again.length > 0 || f.entities >= 5;
-    add('heavy-focus', `$.jigs.${name}.onFocus`, full
-      ? `Opening the screen runs a full sync every time (${f.entities} entities${again.length ? `, the same ${again.join(', ')} the app runs on start` : ''}), with no when: guard.`
-      : 'Opening the screen runs a sync every time, with no when: guard.', full ? {priority: 'high'} : {});
+    const syncers = [...f.syncers];
+    const again = syncers.filter(a => startActions.has(a));
+    const heavy = again.length > 0 || f.entities >= 5;
+    const what = syncers.length ? ` (${syncers.join(', ')})` : '';
+    add('heavy-focus', `$.jigs.${name}.onFocus`,
+      `Opening the screen syncs ${f.entities} ${f.entities === 1 ? 'entity' : 'entities'}${what} every time, with no when: guard` +
+      (again.length ? `; ${again.join(', ')} is the same sync the app runs on start.` : '.'), heavy ? {priority: 'high'} : {});
   }
 
   // Expression scripts: JSONata for simple logic, JavaScript for what JSONata cannot express clearly.
@@ -749,11 +788,23 @@ export function checkPerformance(app, {stats = null, sources = {}} = {}) {
     const params = fn.parameters ?? {};
     // A targeted or windowed pull (a filter in the call) is not a full pull; nor is a table another step pulls by delta.
     const required = Object.entries(params).some(([k, v]) => FILTERED.test(k) && v?.required);
-    if (!deltaTables.has(s.table) && !FILTERED.test(Object.keys(JSON.parse(own)).join(' ')) && !required && once('full'))
-      add('sync-full-pull', s.path, `${s.table} is pulled in full by ${fnName} on every run; no modified-date filter found${st ? ` (${size(st)})` : ''}.`,
+    // Delta only when the filter compares a date; a filter built from an action or screen input
+    // targets records; $top windows the pull. A fixed filter (Status eq 'Active', the user's own
+    // rows) still brings every matching row down on every run.
+    const ownParams = JSON.parse(own);
+    const filterText = Object.entries(ownParams).filter(([k]) => /filter|where|query/i.test(k)).map(([, v]) => JSON.stringify(v)).join(' ');
+    const windowed = Object.keys(ownParams).some(k => /\$top/i.test(k));
+    const targeted = /@ctx\.(action\.parameters|jig\.inputs|current|components)/.test(filterText);
+    const delta = DELTA.test(filterText);
+    if (!deltaTables.has(s.table) && !windowed && !targeted && !delta && !(required && !filterText) && once('full'))
+      add('sync-full-pull', s.path, `${s.table} is pulled in full by ${fnName} on every run; ` +
+        (filterText ? 'its filter does not compare a modified date, so every matching row comes down each time' : 'no modified-date filter found') +
+        `${st ? ` (${size(st)})` : ''}.`,
         {priority: !st ? 'low' : st.rows >= 1000 ? 'high' : st.rows >= 200 ? 'medium' : 'low'});
     const odata = Object.keys(params).some(k => k.startsWith('$')) || /\$(filter|expand|top)=/i.test(fn.url ?? '');
-    if ((fn.method ?? 'GET').toUpperCase() === 'GET' && odata && !('$select' in params) && !/\$select=/i.test(fn.url ?? '') && once('select'))
+    // One record (a $top 0/1 probe, a lookup by an input, a one-row table) has few fields to save.
+    const single = probe || targeted || (st && st.rows <= 1);
+    if ((fn.method ?? 'GET').toUpperCase() === 'GET' && odata && !single && !('$select' in params) && !/\$select=/i.test(fn.url ?? '') && once('select'))
       add('sync-no-select', s.path, `${fnName} fetches every field of ${s.table}${st?.rows ? ` (${Math.round(st.bytes / st.rows)} bytes a row)` : ''}.`,
         {priority: st?.rows && st.bytes / st.rows >= 2048 ? 'medium' : 'low'});
   }
@@ -878,10 +929,15 @@ export const SECTION_MEANING = {
   H: 'Credentials, logging and errors. Problems here are security risk or failures nobody sees.',
 };
 
-export function markdownReport({title, findings, parseErrors = [], stats}) {
+export function markdownReport({title, findings: all, parseErrors = [], stats}) {
+  // Expressions that may throw on an empty value are a safety list of their own: in one review
+  // they were 432 of 816 findings and none was logged at runtime, so they get their own block.
+  const safety = all.filter(f => f.code === 'expression-may-throw');
+  const findings = all.filter(f => f.code !== 'expression-may-throw');
   const count = p => findings.filter(f => f.priority === p).length;
   const lines = [`# Performance audit: ${title}`, '',
-    `**${count('high')} high · ${count('medium')} medium · ${count('low')} low**`, '',
+    `**${count('high')} high · ${count('medium')} medium · ${count('low')} low**` +
+      (safety.length ? ` · ${safety.length} expression-safety findings (own section at the end)` : ''), '',
     'Each finding is a lead from a static scan: confirm it on the device before changing anything',
     '(row and byte counts, a query plan, a timed load). Fix high first, one section at a time.', ''];
   if (parseErrors.length) lines.push(`Not scanned (YAML errors): ${parseErrors.map(e => e.file).join(', ')}`, '');
@@ -908,12 +964,26 @@ export function markdownReport({title, findings, parseErrors = [], stats}) {
       lines.push('');
     }
   }
+  if (safety.length) {
+    const by = p => safety.filter(f => f.priority === p).length;
+    lines.push(`## Expression safety (${safety.length}: ${by('medium')} medium, ${by('low')} low)`, '',
+      'Calls that throw (T0410, D3030) when the value is null or the wrong type. They cost nothing until a value is ' +
+      'empty, so check them against the runtime log (track-load.py lists every expression error) and guard the ones ' +
+      'whose value can really be empty: a typed or picked value, a column that is not set on every row. Keys are low.', '',
+      `**Fix:** ${safety[0].fix}`, '');
+    const files = [...new Set(safety.map(f => f.where.split(' › ')[0]))];
+    for (const file of files) {
+      const here = safety.filter(f => f.where.startsWith(file));
+      lines.push(`- \`${file}\` (${here.length}): ${[...new Set(here.map(f => f.message))].slice(0, 3).join('; ')}${here.length > 3 ? '; …' : ''}`);
+    }
+    lines.push('');
+  }
   if (stats) {
     const top = Object.entries(stats).filter(([, s]) => s.rows).sort((a, b) => b[1].bytes - a[1].bytes).slice(0, 10);
     lines.push('## Largest tables on the device', '', '| Table | Rows | MB |', '| --- | ---: | ---: |',
       ...top.map(([t, s]) => `| ${t} | ${s.rows} | ${(s.bytes / MB).toFixed(2)} |`), '');
   }
-  if (!findings.length) lines.push('No findings.', '');
+  if (!all.length) lines.push('No findings.', '');
   return lines.join('\n');
 }
 

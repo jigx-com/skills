@@ -407,6 +407,14 @@ class LabelTest(unittest.TestCase):
         self.assertEqual([r["label"] for r in cr.load(os.path.join(d, "runs"), "pre")], ["pre-1", "pre-clean-2"])
         self.assertEqual([r["label"] for r in cr.load(os.path.join(d, "runs"), "pre-android")], ["pre-android-1"])
 
+class SerialTest(unittest.TestCase):
+    def test_strict_series_is_named_and_overlap_is_not(self):
+        e = lambda a, b: {"start_s": a, "end_s": b}
+        series = {"s/a": e(0, 1), "s/b": e(1.1, 2), "s/c": e(2, 3), "s/d": e(3.2, 4)}
+        self.assertEqual(tl.serial_chain(series), ["s/a", "s/b", "s/c", "s/d"])
+        waves = {"s/a": e(0, 1), "s/b": e(0, 2), "s/c": e(0.1, 3), "s/d": e(0.2, 4)}
+        self.assertEqual(tl.serial_chain(waves), [])
+
 class AndroidReadTest(unittest.TestCase):
     def test_android_hash_warning_counts(self):
         logs = [{"level": "WARNING", "category": "get-entity-id", "message": "Missing entity id, falling back to hash"},

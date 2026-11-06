@@ -51,6 +51,11 @@ text: |
   or pass the picture of the stored format, `$toMillis(v, '[Y0001]-[M01]-[D01]
   [H01]:[m01]:[s01]')` for SQLite's `datetime()`. With a picture, text in another format
   returns undefined instead of throwing, so the picture must match the data
+- the "no value" branch of a guard whose result feeds another function: return the empty
+  sequence `()`, not `null`. `$fromMillis(v ? $toMillis(v) : null)` still throws T0410 when
+  `v` is empty, because `$fromMillis(null)` throws; `$fromMillis(v ? $toMillis(v) :())`
+  returns undefined (checked on jsonata 1.8.9 in a review and on 2.2.2). The same holds
+  for any guard nested inside `$string`, `$number`, arithmetic or another strict call
 
 `$string(null)` is the text `"null"`, so wrapping in `$string` alone shows "null" to the
 user.
