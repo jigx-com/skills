@@ -185,7 +185,7 @@ def setup_steps(r):
         for d in r["ios"]:
             if not d["jigx_apps"]:
                 add("iOS", f"{d['name']} has no Jigx app",
-                    f"xcrun simctl install {d['udid']} <path to the Jigx simulator build>.app, then sign in with the test user")
+                    f"xcrun simctl install {d['udid']} <the Jigx simulator build>.app, then sign in with the test user")
 
     # Android
     if not e["android_sdk"]:
@@ -220,7 +220,8 @@ def setup_steps(r):
     for d in r["android"]:
         if not d["jigx_apps"]:
             add("Android", f"{d['model']} {d['serial']} has no Jigx app",
-                "adb -s " + d["serial"] + " install <jigx>.apk, then sign in with the test user")
+                "adb -s " + d["serial"] + " install <jigx>.apk (an .aab: convert it with bundletool first, "
+                "device-setup.md Android step 4), then sign in with the test user")
     return steps
 
 

@@ -37,9 +37,9 @@ app and the test user signed in.
    prints the new udid. To see it: in Xcode 27 the simulator window is DeviceHub,
    `open /Applications/Xcode.app/Contents/Applications/DeviceHub.app` (Simulator.app is gone;
    on Xcode 26 and older, `open -a Simulator`).
-4. **The Jigx app.** The App Store does not exist on a simulator: it needs a simulator
-   build (`.app`, not an `.ipa`) of the Jigx app or the customer's branded app. Ask the user
-   where theirs is; with none, they get it from their Jigx contact. Install it with
+4. **The Jigx app.** The App Store does not exist on a simulator: it needs the
+   **simulator build** (`.app`, not an `.ipa`) of the Jigx app or the customer's branded
+   app, which the user should already have. Ask where it is. Install it with
    `xcrun simctl install <udid> <path>.app` (unzip a `.zip` first), open it and sign in
    with the **test** user. Preflight then shows `com.jigx.…` next to the simulator.
 
@@ -70,11 +70,27 @@ app and the test user signed in.
    screen timing.
 3. **Start it.** `emulator -avd jigx-api34 -no-snapshot-load &`, then wait until
    `adb shell getprop sys.boot_completed` prints `1`. One emulator at a time.
-4. **The Jigx app.** A Google APIs image has no Play Store, so install the APK:
-   `adb install <jigx>.apk`. No APK: on a Google Play emulator or a phone that has the app
-   from the Play Store, `adb shell pm path com.jigx.<app>` gives the path (several lines
-   for a split app), `adb pull <path>` each, then `adb install-multiple base.apk split_*.apk`
-   on the Google APIs emulator. Sign in with the test user.
+4. **The Jigx app.** A Google APIs image has no Play Store. The user should already have
+   an **APK** or an **AAB** of the Jigx app or the branded app; ask where it is.
+   - An APK: `adb install <jigx>.apk`.
+   - An AAB (an app bundle cannot be installed directly): convert it with bundletool
+     (`brew install bundletool`) into one universal APK, then install that:
+
+     ```sh
+     bundletool build-apks --bundle=<jigx>.aab --output=jigx.apks --mode=universal
+     unzip -o jigx.apks universal.apk && adb install universal.apk
+     ```
+
+     bundletool signs with the Android debug key (`~/.android/debug.keystore`, made by
+     Android Studio or the first emulator start); with none, add
+     `--ks=<keystore> --ks-key-alias=<alias>`. Because the signature differs from the
+     store build, uninstall any store-signed Jigx app on that emulator first.
+   - Neither: on a Google Play emulator or a phone that has the app from the Play Store,
+     `adb shell pm path com.jigx.<app>` gives the path (several lines for a split app),
+     `adb pull <path>` each, then `adb install-multiple base.apk split_*.apk` on the Google
+     APIs emulator.
+
+   Open the app and sign in with the test user.
 5. **A phone instead** (screens only; its app files are not reachable for sync timing):
    Settings > About phone > tap Build number 7 times; Developer options > USB debugging on;
    plug it in and accept the prompt. `adb devices` must say `device`, not `unauthorized`.
@@ -107,6 +123,8 @@ app and the test user signed in.
 | emulator `PANIC: Missing emulator engine program` or `PANIC: Broken AVD system path` | emulator package or system image missing | `sdkmanager "emulator" "<the image>"` |
 | emulator very slow or "x86 emulation currently requires hardware acceleration" | an `x86_64` image on Apple silicon | use the `arm64-v8a` image |
 | emulator never finishes booting | broken snapshot | `emulator -avd <name> -wipe-data` (signs the app out) |
+| `adb install` of an `.aab` fails, or "Invalid APK file" | an app bundle, not an APK | convert it with bundletool (Android step 4) |
+| bundletool `Keystore file … not found` | no Android debug key yet | start an emulator once, or pass `--ks` and `--ks-key-alias` |
 | `INSTALL_FAILED_NO_MATCHING_ABIS` | APK built for another architecture | an APK for the emulator's ABI, or a universal APK |
 | `INSTALL_FAILED_MISSING_SPLIT` | a split app installed from one APK | pull every split and use `adb install-multiple` |
 | `INSTALL_FAILED_UPDATE_INCOMPATIBLE` | an app with another signature is installed | `adb uninstall com.jigx.<app>`, then install |
