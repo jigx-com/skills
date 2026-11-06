@@ -9,7 +9,9 @@ The end-to-end flow for `/jigx-performance review <solution path>`:
    sections A–H and ordered by priority. Apply only what the user approves.
 4. **Publish and time again**, compare with the baseline, and report what improved.
 
-Everything lives in `perf-review/` in the solution project.
+Everything lives in the review folder `<review>`, outside the solution repo so nothing is
+written into the checkout: `~/jigx-perf-reviews/<solution>/<branch>/`. `preflight.py` prints
+its exact path ("Review folder"); use that path wherever `<review>` appears below.
 
 ## 0. Before starting
 
@@ -32,9 +34,9 @@ Work on a branch in the customer repo. Commit nothing until the user approves ch
 ## 1. Audit
 
 ```sh
-mkdir -p perf-review/before
-node <skill-directory>/scripts/check-performance.mjs <solution> --report perf-review/before/audit.md > perf-review/before/static.json
-python3 <skill-directory>/scripts/check-plans.py <solution> > perf-review/before/plans.json
+mkdir -p <review>/before
+node <skill-directory>/scripts/check-performance.mjs <solution> --report <review>/before/audit.md > <review>/before/static.json
+python3 <skill-directory>/scripts/check-plans.py <solution> > <review>/before/plans.json
 ```
 
 `<solution>` is the YAML folder or the SDK `build/output.json`. Check every high and
@@ -52,23 +54,23 @@ simulator, user and data for every run, before and after.
 
 | Area | Tool | Output |
 | --- | --- | --- |
-| Sync: time to ready, each scope and step, queue, timeouts | `track-load.py`, three runs (`pre-1..3`; on Android `--android`, labels `pre-android-1..3`) | `perf-review/runs/` |
-| Queries: every datasource query on the device's real data, and at 10x data (`--scale 10`: what grows faster than the data) | `time-queries.mjs` | `perf-review/before/timings.{json,md}` |
-| Functions: every sync step's call and write | `track-load.py` (same runs as the sync) | `perf-review/runs/` |
+| Sync: time to ready, each scope and step, queue, timeouts | `track-load.py`, three runs (`pre-1..3`; on Android `--android`, labels `pre-android-1..3`) | `<review>/runs/` |
+| Queries: every datasource query on the device's real data, and at 10x data (`--scale 10`: what grows faster than the data) | `time-queries.mjs` | `<review>/before/timings.{json,md}` |
+| Functions: every sync step's call and write | `track-load.py` (same runs as the sync) | `<review>/runs/` |
 | Actions: every `execute-sql` step (rolled back) and index build | `time-queries.mjs` (same run) | the same files |
-| Screens and cold start: to the ready element, including datasources, expressions and rendering | `time-screens.py`, three runs a screen, per platform | `perf-review/screens/pre.{json,md}`, `pre-android.{json,md}` |
+| Screens and cold start: to the ready element, including datasources, expressions and rendering | `time-screens.py`, three runs a screen, per platform | `<review>/screens/pre.{json,md}`, `pre-android.{json,md}` |
 | Expressions | no runtime timing exists; measured inside screen time, located by the audit (`per-row-datasource-read`, `filter-inside-map`) | — |
 
 ```sh
-python3 <skill-directory>/scripts/track-load.py --solution <test-solution> --wait --out perf-review/runs --label pre-1 --scopes <scopes>
+python3 <skill-directory>/scripts/track-load.py --solution <test-solution> --wait --out <review>/runs --label pre-1 --scopes <scopes>
 # after the sync: the database the timings run on
 python3 <skill-directory>/scripts/track-load.py --list
 node <skill-directory>/scripts/time-queries.mjs <solution> --db <test-solution database> --scale 10 \
-  --report perf-review/before/timings.md > perf-review/before/timings.json
-python3 <skill-directory>/scripts/time-screens.py perf-review/screens.json --label pre --out perf-review/screens
+  --report <review>/before/timings.md > <review>/before/timings.json
+python3 <skill-directory>/scripts/time-screens.py <review>/screens.json --label pre --out <review>/screens
 # Android, same spec
-python3 <skill-directory>/scripts/track-load.py --android --solution <test-solution> --wait --out perf-review/runs --label pre-android-1 --scopes <scopes>
-python3 <skill-directory>/scripts/time-screens.py perf-review/screens.json --platform android --label pre-android --out perf-review/screens
+python3 <skill-directory>/scripts/track-load.py --android --solution <test-solution> --wait --out <review>/runs --label pre-android-1 --scopes <scopes>
+python3 <skill-directory>/scripts/time-screens.py <review>/screens.json --platform android --label pre-android --out <review>/screens
 ```
 
 - **Sync**: arm the tracker, then sign in; repeat for `pre-2`, `pre-3`. Drive the
@@ -80,7 +82,7 @@ python3 <skill-directory>/scripts/time-screens.py perf-review/screens.json --pla
   for a big customer. Read each one's plan with `profile-query.py` before proposing a fix. Parameters are sampled from the data; pass
   `--params params.json` for the ids the key screens open with. A phone is several
   times slower than the host: rank by these numbers, do not quote them as device time.
-- **Screens**: write `perf-review/screens.json` once (format in `time-screens.py`):
+- **Screens**: write `<review>/screens.json` once (format in `time-screens.py`):
   for each screen the tap that opens it and a text or id that is only visible once its
   data has loaded (a row number, not the title). Read the screen's YAML or TS for the
   label and ready element, and confirm them in the simulator. Add one static screen as
@@ -91,7 +93,7 @@ which and continue with the rest.
 
 ## 3. Overview and proposal
 
-Run `review-report.py perf-review --solution <name>` for the baseline overview: load
+Run `review-report.py <review> --solution <name>` for the baseline overview: load
 time, the slowest queries, actions and screens, and the findings per section. Read the
 references for each section and review what the scripts cannot see: state, expressions,
 screen size, start-up, sync shape, writes, credentials. Then present:
@@ -131,7 +133,7 @@ For each approved section, in order:
   reordering or parallelising it (`jigx` `sync-orchestration.md`)
 - keep every index or rewrite equivalence-checked (`verifying.md`)
 - add a `check-plans.py` guard for each per-row or per-change lookup you fixed
-- append each change to `perf-review/changes.json` as
+- append each change to `<review>/changes.json` as
   `{"section": "B", "change": "Index orders by reference", "files": ["actions/create-indexes.jigx"]}`
 - rebuild (SDK: `jigx build`) and run the `jigx` runtime checker; stop and report if it
   fails
@@ -140,16 +142,16 @@ Then audit again, publish to the same test solution and repeat every timing from
 with the same journeys, data and simulator:
 
 ```sh
-mkdir -p perf-review/after
-node <skill-directory>/scripts/check-performance.mjs <solution> --report perf-review/after/audit.md > perf-review/after/static.json
-python3 <skill-directory>/scripts/check-plans.py <solution> > perf-review/after/plans.json
-python3 <skill-directory>/scripts/track-load.py --solution <test-solution> --wait --out perf-review/runs --label post-1 --scopes <scopes>
+mkdir -p <review>/after
+node <skill-directory>/scripts/check-performance.mjs <solution> --report <review>/after/audit.md > <review>/after/static.json
+python3 <skill-directory>/scripts/check-plans.py <solution> > <review>/after/plans.json
+python3 <skill-directory>/scripts/track-load.py --solution <test-solution> --wait --out <review>/runs --label post-1 --scopes <scopes>
 node <skill-directory>/scripts/time-queries.mjs <solution> --db <test-solution database> --scale 10 \
-  --baseline perf-review/before/timings.json --report perf-review/after/timings.md > perf-review/after/timings.json
-python3 <skill-directory>/scripts/time-screens.py perf-review/screens.json --label post --out perf-review/screens --compare pre
-python3 <skill-directory>/scripts/time-screens.py perf-review/screens.json --platform android --label post-android --out perf-review/screens --compare pre-android
-python3 <skill-directory>/scripts/compare-runs.py perf-review/runs --before pre --after post
-python3 <skill-directory>/scripts/review-report.py perf-review --solution <name>
+  --baseline <review>/before/timings.json --report <review>/after/timings.md > <review>/after/timings.json
+python3 <skill-directory>/scripts/time-screens.py <review>/screens.json --label post --out <review>/screens --compare pre
+python3 <skill-directory>/scripts/time-screens.py <review>/screens.json --platform android --label post-android --out <review>/screens --compare pre-android
+python3 <skill-directory>/scripts/compare-runs.py <review>/runs --before pre --after post
+python3 <skill-directory>/scripts/review-report.py <review> --solution <name>
 ```
 
 Compare the row count of every table with a copy of the database taken after a pre
@@ -160,7 +162,7 @@ same sync of the same user), or the comparison measures the data, not the change
 
 ## 5. Report
 
-Show the user `perf-review/report.md`:
+Show the user `<review>/report.md`:
 
 - **Sync**: time to ready before and after, the steps that got faster or slower,
   snapshot timeouts and errors

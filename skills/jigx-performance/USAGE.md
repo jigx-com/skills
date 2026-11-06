@@ -17,14 +17,15 @@ Claude:
    another branch yourself or set up a device and run it again. Claude never switches the
    branch for you
 2. audits it in a few seconds and shows each confirmed problem as *what is wrong ·
-   where · the fix*, by priority (full list in `perf-review/before/audit.md`)
+   where · the fix*, by priority (full list in `before/audit.md` in the review folder,
+   `~/jigx-perf-reviews/<solution>/<branch>/`: nothing is written into your repo)
 3. asks what next:
    - **Time it and fix it**: times the sync, every query and action, the app's cold
      start and the screens you open most, in the iOS Simulator and on Android; proposes fixes as diffs in your language
      (`.jigx` or `src/*.ts`), grouped by section and ordered by priority; applies only
      what you approve; publishes to your **test** solution, times everything again and
      reports what got faster, what did not move, and any regression
-     (`perf-review/report.md`)
+     (`report.md` in the review folder)
    - **Fix the high findings now**, without timing
    - **Stop here**
 

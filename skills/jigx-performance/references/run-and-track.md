@@ -32,6 +32,24 @@ with at least 2 successful runs a side. Put a static screen in the spec as a con
 Cold-start screens run after all the others, so no screen meets an app that is still
 starting.
 
+Navigate by id, not text, and give the spec a top-level `reset` that returns to the start
+screen; it runs before every warm run, and after a failed run the app is restarted too,
+so one failed back step cannot break the rest (one review lost 13 of 21 runs to that).
+Ids that work in Jigx apps (`maestro hierarchy` prints the rest):
+
+| Element | Id |
+|---|---|
+| Back button of a pushed screen | `<jig-id>.back.icon` |
+| Back button of a list screen | `navigation-bar-extended.back-button.icon` |
+| A tab | `tab-bar.<uuid>-<name>` (e.g. `tab-bar.<uuid>-home`) |
+
+A tab's text starts with its icon glyph (`\ueac1, Home`), so match tab text with `.*Home`.
+`{"back": true}` is Android's back button only; on iOS tap the back button's id. The
+control screen also needs an id-based ready element: its static text can match before
+the screen has moved. Time each screen on the record with the most rows for it (the
+project with the most photos, drawings and notes), not the first one in the list: a
+screen with no rows times nothing.
+
 **Queries and actions.** `time-queries.mjs` copies the database with `VACUUM INTO`
 (read-only on the original), builds the shipped indexes on the copy, then times every
 query and every `execute-sql` step inside a transaction it rolls back. Each parameter
@@ -103,10 +121,19 @@ use.
      pull every few minutes) ends the run early with a one-second "ready".
    - It prints a line per change, stops when every tracked scope is synced and
      `_commandQueue` is empty for `--settle` seconds (or on a failed entry, or
-     `--timeout`), then prints a waterfall and writes `perf-runs/<label>-summary.json`
+     `--timeout`), then prints a waterfall and writes `<review>/runs/<label>-summary.json`
      and `-samples.jsonl`.
    - Time from the first scope start, not from arming: the wait before it includes the
      user typing credentials.
+   - **Acumatica OAuth sign-in** interrupts the identity sync while the login page waits;
+     the tracker treats `interrupted` as a pause, takes that time out of every total,
+     scope and entry (`interrupted_s`; raw values in `*_raw_s`), and does not count the
+     restart after it as a second sync.
+   - **After sign-in, switch the app to the test solution.** It opens the user's last
+     solution; while nothing starts, the tracker says which other solution is syncing.
+   - **Arm before the load, never during it.** A "Signing out" log line or a recreated
+     database starts the run again (a reloaded build can sync once before the sign-out);
+     a run armed while the sync was already going ends `invalid`.
    - After the first baseline run, copy the database for the data check below:
      `sqlite3 "file:<db>?mode=ro" ".backup 'baseline.db'"`.
 4. **Three runs per side.** `pre-1..3` on the old build, `post-1..3` on the new one, each
@@ -114,7 +141,7 @@ use.
 5. **Compare.**
 
    ```sh
-   python3 <skill-directory>/scripts/compare-runs.py perf-runs --before pre --after post
+   python3 <skill-directory>/scripts/compare-runs.py <review>/runs --before pre --after post
    ```
 
    It reports medians for first start to ready, the sync work (time any scope is syncing,

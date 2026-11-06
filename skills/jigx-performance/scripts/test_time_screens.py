@@ -57,6 +57,44 @@ class TimeScreensTest(unittest.TestCase):
         after = result({"control": [3400, None, None]})
         self.assertTrue(ts.compare(before, after)[0]["verdict"].startswith("not comparable"))
 
+    def test_reset_and_restart_bring_every_run_back_to_the_start(self):
+        screen = {"name": "list", "tap": "Schedule", "ready": r"\d{6}"}
+        text = ts.flow("com.jigx.app", screen, "ios", reset=[{"tap": {"id": "tab-bar.1-home"}}], restart=True)
+        lines = text.splitlines()
+        self.assertEqual(lines[2], "- stopApp")
+        self.assertLess(lines.index('- tapOn: {"id": "tab-bar.1-home"}'), lines.index("- evalScript: ${output.t0 = Date.now()}"))
+        self.assertNotIn("- stopApp", ts.flow("com.jigx.app", screen, "ios"))
+
+    def test_timeout_is_a_failed_run_and_results_survive(self):
+        import json, subprocess, tempfile
+        calls = []
+        def fake_run(cmd, **kw):
+            calls.append(cmd)
+            if cmd[1:2] == ["--version"]:
+                return subprocess.CompletedProcess(cmd, 0, "2.12.1\n", "")
+            raise subprocess.TimeoutExpired(cmd, kw.get("timeout"))
+        d = tempfile.mkdtemp()
+        spec_path = os.path.join(d, "screens.json")
+        with open(spec_path, "w") as f:
+            json.dump({"appId": "com.jigx.app", "screens": [{"name": "a", "tap": "A", "ready": "x"}, {"name": "b", "tap": "B", "ready": "y"}]}, f)
+        maestro = os.path.join(d, "maestro"); open(maestro, "w").close()
+        orig = (ts.subprocess.run, ts.shutil.which, ts.describe_device)
+        try:
+            ts.subprocess.run = fake_run
+            ts.shutil.which = lambda name: maestro
+            ts.describe_device = lambda plat, dev=None: "test device"
+            code = ts.main([spec_path, "--label", "pre", "--runs", "3", "--out", d, "--platform", "ios"])
+        finally:
+            ts.subprocess.run, ts.shutil.which, ts.describe_device = orig
+        self.assertEqual(code, 1)
+        with open(os.path.join(d, "pre.json")) as f:
+            saved = json.load(f)
+        runs = saved["screens"]["a"]["runs"]
+        self.assertIn("did not finish within", runs[0]["error"])
+        self.assertIn("skipped after 2", runs[2]["error"])
+        self.assertFalse(os.path.exists(os.path.join(d, "pre.partial.json")))
+        # warm-up + 2 tried runs per screen (the third is skipped), plus --version
+        self.assertEqual(len(calls), 1 + 1 + 2 * 2)
 
 if __name__ == "__main__":
     unittest.main()

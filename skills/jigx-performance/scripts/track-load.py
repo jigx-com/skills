@@ -18,6 +18,15 @@ writes <out>/<label>-summary.json with the time from the first scope start to
 ready, per-scope and per-entry durations, a waterfall, final counts and log
 signals. Compare runs with compare-runs.py.
 
+A scope in the runtime's "interrupted" state is paused, not failed: Acumatica OAuth
+sign-in interrupts the identity sync while the login page waits for the user. The time
+any tracked scope is interrupted is subtracted from the totals, scope and entry times
+(the raw values are kept as *_raw_s), so typing the password is not counted as sync. A
+"Signing out" log line or a recreated database starts the run again (a build that
+reloads can sync once before the sign-out). Armed while a sync was already running, the
+run ends "invalid" once that sync finishes: arm first, then sign in. While nothing has
+started it says when the app is syncing another solution instead.
+
 Only entry states are kept from `details`: it also holds function parameters,
 which can carry URLs and credentials. Log lines keep level, category and a
 redacted message; `additionalParameters` is never read.
@@ -69,7 +78,7 @@ def iso(ms):
 def solution_dbs(name="*", android=None):
     if android:
         return android_dbs(android, name)
-    return sorted(glob.glob(os.path.join(SIMULATORS, "*", DB_GLOB.format(name=name))), key=os.path.getmtime, reverse=True)
+    return sorted(glob.glob(os.path.join(SIMULATORS, "*", DB_GLOB.format(name=name))), key=last_write, reverse=True)
 
 
 def adb():
@@ -129,6 +138,32 @@ class AdbDb:
         if v == self.NULL:
             return None
         return int(v) if re.fullmatch(r"-?\d+", v) else float(v) if re.fullmatch(r"-?\d+\.\d+", v) else v
+
+
+SIGN_OUT = re.compile(r"signing out", re.I)
+
+
+def file_id(path):
+    """The database file's identity: it changes when a logout deletes and a sign-in recreates it."""
+    if path.startswith("adb:"):
+        return None
+    try:
+        st = os.stat(path)
+        return (st.st_dev, st.st_ino)
+    except OSError:
+        return None
+
+
+def last_write(path):
+    """When the database last changed: its -wal file moves first (the main file can keep one timestamp)."""
+    return max((os.path.getmtime(p) for p in (path, path + "-wal") if os.path.exists(p)), default=0)
+
+
+def other_solutions_busy(db, since_ms):
+    """Other solutions in the same app whose database changed since arming."""
+    folder, me = os.path.dirname(db), solution_name(db)
+    return sorted({solution_name(p) for p in glob.glob(os.path.join(folder, "jigx.solution.___*___.*.db"))
+                   if solution_name(p) != me and last_write(p) * 1000 > since_ms})
 
 
 def solution_name(path):
@@ -208,8 +243,10 @@ def status(state, scopes, armed):
     started = [v for v in run.values() if fresh(v, armed)]
     if not started:
         return "waiting"
-    if any(v["state"] in ("failed", "interrupted") or "failed" in v["entries"].values() for v in started):
+    if any(v["state"] == "failed" or "failed" in v["entries"].values() for v in started):
         return "failed"
+    if any(v["state"] == "interrupted" for v in started):
+        return "paused"  # e.g. the OAuth login page is waiting for the user
     if len(started) == len(run) and state["queue"] == 0 and all(
             v["state"] == "synced" and all(e == "synced" for e in v["entries"].values()) for v in started):
         return "ready"
@@ -292,8 +329,10 @@ def expression_errors(logs):
 def scope_runs(samples, armed):
     """Every sync of every scope started after arming: {scope: [[start_ms, end_ms or None], ...]}.
     A scope that syncs again (a screen's onFocus after the sign-in sync) shows as a second run,
-    which the final state alone hides: it keeps only the last start."""
-    runs = {}
+    which the final state alone hides: it keeps only the last start.
+    Each span is [start_ms, end_ms or None, resumed]: resumed when the run before it was
+    interrupted (the runtime restarts a scope after the OAuth login), so it is not a repeat."""
+    runs, interrupted = {}, set()
     for sample in samples:
         for sid, v in sample["scopes"].items():
             start, end = v.get("startedAt"), v.get("syncedAt")
@@ -301,25 +340,52 @@ def scope_runs(samples, armed):
                 continue
             spans = runs.setdefault(sid, [])
             if not spans or spans[-1][0] != start:
-                spans.append([start, None])
+                if spans and spans[-1][1] is None:
+                    spans[-1][1] = start  # an unfinished run (interrupted) ends where the next one starts
+                spans.append([start, None, sid in interrupted])
+                interrupted.discard(sid)
+            if v.get("state") == "interrupted":
+                interrupted.add(sid)
             if end and end >= start:
                 spans[-1][1] = end
     return runs
 
 
-def busy_seconds(runs, until=None):
-    """Time at least one scope was syncing: the union of every run, an unfinished one up to `until`."""
-    spans = sorted([a, b or until] for spans in runs.values() for a, b in spans if b or until)
-    total, cur = 0, None
+def paused_spans(samples, armed, only=None):
+    """[start_ms, end_ms] while any fresh scope (or the scope `only`) was interrupted, from
+    the first sample showing it to the first sample after it that does not."""
+    spans, cur = [], None
+    for sample in samples:
+        at = armed + sample["t"] * 1000
+        hit = any(v and v.get("state") == "interrupted" and (v.get("startedAt") or 0) >= armed
+                  for sid, v in sample["scopes"].items() if only in (None, sid))
+        if hit and cur is None:
+            cur = [at, None]
+        elif not hit and cur is not None:
+            cur[1] = at
+            spans.append(cur)
+            cur = None
+    if cur is not None:
+        cur[1] = armed + samples[-1]["t"] * 1000
+        spans.append(cur)
+    return spans
+
+
+def overlap_ms(a, b, spans):
+    return sum(max(0, min(b, y) - max(a, x)) for x, y in spans) if a is not None and b is not None else 0
+
+
+def busy_seconds(runs, until=None, paused=()):
+    """Time at least one scope was syncing: the union of every run, an unfinished one up to
+    `until`, less the time a scope was interrupted (paused)."""
+    spans = sorted([a, b or until] for spans in runs.values() for a, b, *_ in spans if b or until)
+    merged = []
     for a, b in spans:
-        if cur and a <= cur[1]:
-            cur[1] = max(cur[1], b)
+        if merged and a <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], b)
         else:
-            if cur:
-                total += cur[1] - cur[0]
-            cur = [a, b]
-    if cur:
-        total += cur[1] - cur[0]
+            merged.append([a, b])
+    total = sum(b - a - overlap_ms(a, b, paused) for a, b in merged)
     return round(total / 1000, 2)
 
 
@@ -330,7 +396,21 @@ def summarise(label, db, samples, result, armed, ready_at, logs, final, scopes):
     # The first start of a tracked scope, not its last: a second sync moves the final startedAt.
     starts += [spans[0][0] for sid, spans in runs.items() if sid in run]
     first_start = min(starts) if starts else None
+    paused = paused_spans(samples, armed) if samples else []
     entries = entry_timings(samples, armed)
+    for e in entries.values():  # entry times are seconds since arming
+        if e["duration_s"] is not None and paused:
+            cut = overlap_ms(armed + e["start_s"] * 1000, armed + e["end_s"] * 1000, paused) / 1000
+            if cut:
+                e["duration_raw_s"], e["duration_s"] = e["duration_s"], round(e["duration_s"] - cut, 2)
+    total_raw = (ready_at - first_start) / 1000 if ready_at and first_start else None
+    interrupted = overlap_ms(first_start, ready_at, paused) / 1000 if total_raw is not None else 0
+
+    def scope_duration(sid, v):
+        if not (v and v["syncedAt"] and v["startedAt"] and v["syncedAt"] >= v["startedAt"]):
+            return None
+        cut = overlap_ms(v["startedAt"], v["syncedAt"], paused_spans(samples, armed, sid)) if samples else 0
+        return round((v["syncedAt"] - v["startedAt"] - cut) / 1000, 2)
     snapshot = {}
     for row in logs:
         m = re.search(r"'([^']+)' Timeout for first snapshot", row["message"])
@@ -345,17 +425,18 @@ def summarise(label, db, samples, result, armed, ready_at, logs, final, scopes):
         "solution": solution_name(db),
         "armed_at": iso(armed),
         "result": result,
-        "first_start_to_ready_s": round((ready_at - first_start) / 1000, 2) if ready_at and first_start else None,
+        "first_start_to_ready_s": round(total_raw - interrupted, 2) if total_raw is not None else None,
+        # Time a scope sat interrupted (the OAuth login page), already taken out of the values above.
+        "interrupted_s": round(sum(b - a for a, b in paused) / 1000, 2),
+        "first_start_to_ready_raw_s": round(total_raw, 2) if total_raw is not None else None,
         "arm_to_ready_s": round((ready_at - armed) / 1000, 2) if ready_at else None,
         # All sync work, also after ready: a second sync of the same scope halves nothing in
         # first_start_to_ready_s but doubles this.
-        "sync_busy_s": busy_seconds(runs, now_ms() if result != "ready" else None) if runs else None,
-        "scope_starts": {sid: len(spans) for sid, spans in sorted(runs.items())},
-        "repeated_scopes": sorted(sid for sid, spans in runs.items() if len(spans) > 1),
-        "scopes": {sid: {"state": v["state"],
-                         "duration_s": round((v["syncedAt"] - v["startedAt"]) / 1000, 2)
-                         if v and v["syncedAt"] and v["startedAt"] and v["syncedAt"] >= v["startedAt"] else None}
-                   for sid, v in run.items() if v},
+        "sync_busy_s": busy_seconds(runs, now_ms() if result != "ready" else None, paused) if runs else None,
+        # A restart after an interruption is the same sync resuming, not a second one.
+        "scope_starts": {sid: sum(1 for sp in spans if not sp[2]) for sid, spans in sorted(runs.items())},
+        "repeated_scopes": sorted(sid for sid, spans in runs.items() if sum(1 for sp in spans if not sp[2]) > 1),
+        "scopes": {sid: {"state": v["state"], "duration_s": scope_duration(sid, v)} for sid, v in run.items() if v},
         "entries": entries,
         "slowest_entries": sorted(((n, e["duration_s"]) for n, e in entries.items() if e["duration_s"] is not None),
                                   key=lambda x: -x[1])[:10],
@@ -377,10 +458,13 @@ def track(db, label, out, tables=(), scopes=(), interval=0.25, settle=5.0, timeo
     # skip log lines written before arming
     _, last_log = read_logs(log_db, 0, armed)
     result, ready_since, ready_at, final = "timeout", None, None, None
+    started_at, restarts, before_arming, idle_since, others_checked = armed, 0, set(), None, 0
+    announced = set()
+    inode = file_id(db)
     print(f"Tracking {solution_name(db)} as '{label}'. Start the load now (log in, refresh or open the screen).",
           file=stream, flush=True)
     with open(os.path.join(out, f"{label}-samples.jsonl"), "w", encoding="utf-8") as jsonl:
-        while now_ms() - armed < timeout * 1000:
+        while now_ms() - started_at < timeout * 1000:
             t = (now_ms() - armed) / 1000
             try:
                 state = read_state(db, tables)
@@ -389,6 +473,18 @@ def track(db, label, out, tables=(), scopes=(), interval=0.25, settle=5.0, timeo
                 continue
             final = state
             new_logs, last_log = read_logs(log_db, last_log, armed)
+            recreated = file_id(db) != inode
+            signed_out = any(SIGN_OUT.search(r["message"]) for r in new_logs)
+            if signed_out or recreated:
+                # A build that reloads can sync once before the sign-out: start this run again.
+                inode, restarts = file_id(db), restarts + 1
+                armed, samples, logs, last_sig, ready_since, ready_at = now_ms(), [], [], None, None, None
+                before_arming.clear()
+                jsonl.write(json.dumps({"at": iso(armed), "restart": "sign-out" if signed_out else "database recreated"}) + "\n")
+                print(f"{t:7.2f}s  {'Sign-out seen' if signed_out else 'Database recreated'}: the run starts again from here.",
+                      file=stream, flush=True)
+                time.sleep(interval)
+                continue
             for row in new_logs:
                 logs.append(row)
                 print(f"{t:7.2f}s  LOG {row['level']} {row['category']}: {row['message'][:140]}", file=stream, flush=True)
@@ -403,6 +499,29 @@ def track(db, label, out, tables=(), scopes=(), interval=0.25, settle=5.0, timeo
             if st == "failed":
                 result = "failed"
                 break
+            if st == "waiting":
+                pool = {s: state["scopes"].get(s) for s in scopes} if scopes else state["scopes"]
+                running = {s for s, v in pool.items() if v and v["state"] in ("syncing", "interrupted") and (v["startedAt"] or 0) < armed}
+                for s in running - before_arming:
+                    print(f"{t:7.2f}s  {s} was already syncing when tracking started; it cannot be timed in this run.",
+                          file=stream, flush=True)
+                before_arming |= running
+                if before_arming and not running:
+                    idle_since = idle_since or now_ms()
+                    if now_ms() - idle_since >= settle * 2000:
+                        result = "invalid"
+                        print("Everything synced before tracking started. Arm first (sign out, start track-load), "
+                              "then sign in.", file=stream, flush=True)
+                        break
+                if not db.startswith("adb:") and now_ms() - others_checked > 2000:
+                    others_checked = now_ms()
+                    busy = [n for n in other_solutions_busy(db, armed) if n not in announced]
+                    announced.update(busy)
+                    if busy:
+                        print(f"{t:7.2f}s  The app is syncing {', '.join(busy)}, not {solution_name(db)}: "
+                              "switch to the test solution in the app.", file=stream, flush=True)
+            else:
+                idle_since = None
             if st == "ready":
                 if ready_since is None:
                     ready_since = now_ms()
@@ -415,12 +534,16 @@ def track(db, label, out, tables=(), scopes=(), interval=0.25, settle=5.0, timeo
                 ready_since, ready_at = None, None
             time.sleep(interval)
     summary = summarise(label, db, samples, result, armed, ready_at if result == "ready" else None, logs, final, scopes)
+    summary["restarts"] = restarts
     with open(os.path.join(out, f"{label}-summary.json"), "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
     total = summary["first_start_to_ready_s"]
     print("\n".join(["", f"{label}: {result}, first start to ready {'n/a' if total is None else f'{total}s'}", ""]
                     + waterfall(summary["entries"])), file=stream)
     print(f"Sync busy {summary['sync_busy_s']}s, {sum(summary['scope_starts'].values())} scope start(s)", file=stream)
+    if summary["interrupted_s"]:
+        print(f"Interrupted (e.g. the login page) {summary['interrupted_s']}s, not counted; "
+              f"first start to ready with it: {summary['first_start_to_ready_raw_s']}s", file=stream)
     for sid in summary["repeated_scopes"]:
         print(f"WARNING: {sid} synced {summary['scope_starts'][sid]} times in one run; look for an onFocus or "
               "onLoad that starts the same sync again", file=stream)
@@ -443,7 +566,7 @@ def main(argv=None):
     p.add_argument("--solution", help="solution name; finds the newest matching simulator database")
     p.add_argument("--label", default=datetime.datetime.now().strftime("run-%H%M%S"),
                    help="run label; prefix with pre-/post- for compare-runs.py")
-    p.add_argument("--out", default="perf-runs")
+    p.add_argument("--out", default=os.path.expanduser("~/jigx-perf-reviews/runs"), help="the review folder's runs/ (preflight.py prints the review folder); never inside the solution repo")
     p.add_argument("--table", action="append", default=[], help="table to count each sample; repeatable")
     p.add_argument("--scopes", default="", help="comma-separated sync scope ids that define ready; default: every scope "
                    "started after arming. Name them for a login journey, or a periodic background sync ends the run early")
@@ -457,9 +580,17 @@ def main(argv=None):
     if android and args.interval == 0.25:
         args.interval = 0.5  # each read is an adb round trip
     if args.list:
-        for path in solution_dbs(android=android):
-            when = "" if android else f"{datetime.datetime.fromtimestamp(os.path.getmtime(path)):%Y-%m-%d %H:%M}"
-            print(f"{solution_name(path):40} {when:16}  {path}")
+        paths = solution_dbs(android=android)
+        if not paths:
+            print("No solution databases yet: sign in to the app first.")
+        seen = {}
+        for path in paths:  # newest first; older copies (other simulators, reinstalls) are counted, not listed
+            seen.setdefault(solution_name(path), []).append(path)
+        for name, copies in seen.items():
+            when = "" if android else f"{datetime.datetime.fromtimestamp(last_write(copies[0])):%Y-%m-%d %H:%M:%S}"
+            mark = "*" if args.solution and name == args.solution else " "
+            more = f"  (+{len(copies) - 1} older)" if len(copies) > 1 else ""
+            print(f"{mark} {name:40} {when:19}  {copies[0]}{more}")
         return 0
     db = args.db
     if not db and args.solution:

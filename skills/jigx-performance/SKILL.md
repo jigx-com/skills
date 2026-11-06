@@ -37,7 +37,7 @@ the user; ask as little as possible.
    name and what it means for the app (`SECTION_MEANING` in `check-performance.mjs`,
    e.g. "F Sync: how data comes from the server; slow here means long sign-in"). Say
    plainly that every confirmed high and medium finding needs fixing. Put the full list in
-   `perf-review/before/audit.md` and say where it is.
+   `<review>/before/audit.md` and say where it is.
 3. **Ask one question** with these choices:
    - **Time it and fix it**: the full review below (timings, fixes you approve,
      timings again). Recommend this when there are high or medium findings.
@@ -56,7 +56,7 @@ check before I commit"). It needs no device, so do not mention devices or setup:
    anything the audit itself needs (Node 18+; Ruby for YAML). Do not ask which branch:
    the audit is read-only and takes seconds. Say "to audit another branch, check it out
    and run it again".
-2. Step 2 above (the audit and `perf-review/before/audit.md`), with no plan or timing
+2. Step 2 above (the audit and `<review>/before/audit.md`), with no plan or timing
    questions. For SDK, run `jigx build` first when `build/output.json` is missing or
    older than `src/`.
 3. End with one line, not a question: high and medium findings can be fixed as diffs
@@ -90,7 +90,7 @@ Follow `references/customer-review.md`:
 1. Confirm the solution and whether it is YAML or TypeScript SDK, the **test**
    solution to publish to, the sign-in sync and the 3–6 screens to time, and the test
    data.
-2. **Audit**: static scan and plan check into `perf-review/before/`.
+2. **Audit**: static scan and plan check into `<review>/before/`.
 3. **Time the current solution** after publishing it to the test solution (YAML:
    `copy-to-test.py`, then Jigx Builder; SDK: `jigx_debug`): sync
    (`track-load.py`, three runs; `--android` on an Android emulator), every query and
@@ -112,7 +112,7 @@ Follow `references/customer-review.md`:
    rebuild and check after each, publish to the
    same test solution and **time everything again** (`post`); compare with
    `compare-runs.py`, `time-queries.mjs --baseline` and `time-screens.py --compare`, and
-   show `perf-review/report.md` with feedback: what got faster, what did not move, any
+   show `<review>/report.md` with feedback: what got faster, what did not move, any
    regression, what was not verified.
 
 ## Audit
@@ -122,8 +122,13 @@ Follow `references/customer-review.md`:
    --list`), so sync findings are sized by real rows and bytes:
 
    ```sh
-   node <skill-directory>/scripts/check-performance.mjs <solution> --db <device.db> --report audit.md > audit.json
+   node <skill-directory>/scripts/check-performance.mjs <solution> --db <device.db> \
+     --report <review>/before/audit.md > <review>/before/static.json
    ```
+
+   `<review>` is the review folder `preflight.py` prints, outside the solution repo
+   (`~/jigx-perf-reviews/<solution>/<branch>/`); never write into the checkout. The file
+   names are the ones `review-report.py` reads (`references/customer-review.md`).
 
    Every finding has a priority (high, medium, low), a section, where it is (file, then
    the path inside it), what is wrong and the recommended fix. `audit.md` groups them
@@ -139,6 +144,7 @@ Follow `references/customer-review.md`:
    scans and unused indexes from the query planner:
 
    ```sh
+   python3 <skill-directory>/scripts/check-plans.py <solution> > <review>/before/plans.json
    python3 <skill-directory>/scripts/check-plans.py <solution> --scans-only
    ```
 

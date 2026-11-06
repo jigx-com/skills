@@ -292,6 +292,85 @@ class RepeatedSyncTest(unittest.TestCase):
         self.assertTrue(any("main synced more than once" in w for w in report["warnings"]))
 
 
+class InterruptedAndRestartTest(unittest.TestCase):
+    def test_oauth_login_pause_is_not_counted(self):
+        # identity syncs 1-2 s, waits on the login page 2-12 s (interrupted), restarts and syncs 12-13 s.
+        sc = lambda state, start, end, e: {"identity": {"state": state, "startedAt": start, "syncedAt": end, "entries": {"whoami": e}}}
+        samples = [{"t": 1.0, "scopes": sc("syncing", 1000, None, "syncing"), "queue": 0, "counts": {}},
+                   {"t": 2.0, "scopes": sc("interrupted", 1000, None, "syncing"), "queue": 0, "counts": {}},
+                   {"t": 12.0, "scopes": sc("syncing", 12000, None, "syncing"), "queue": 0, "counts": {}},
+                   {"t": 13.0, "scopes": sc("synced", 12000, 13000, "synced"), "queue": 0, "counts": {}}]
+        self.assertEqual(tl.status(samples[1], ["identity"], 0), "paused")
+        s = tl.summarise("pre-1", "x.db", samples, "ready", 0, 13000, [], samples[-1], ["identity"])
+        self.assertEqual(s["interrupted_s"], 10.0)
+        self.assertEqual(s["first_start_to_ready_raw_s"], 12.0)
+        self.assertEqual(s["first_start_to_ready_s"], 2.0)
+        self.assertEqual(s["entries"]["identity/whoami"]["duration_s"], 2.0)  # 12 s with the login page
+        self.assertEqual(s["scope_starts"], {"identity": 1})                 # the restart is a resume
+        self.assertEqual(s["repeated_scopes"], [])
+        self.assertEqual(s["sync_busy_s"], 2.0)
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.db = os.path.join(self.dir, "jigx.solution.___demo-test___.0000.db")
+        conn = sqlite3.connect(self.db)
+        conn.execute("CREATE TABLE _syncScope (id TEXT PRIMARY KEY, state TEXT, details TEXT, lastStartedAt INTEGER, lastSyncedAt INTEGER)")
+        conn.execute("CREATE TABLE _commandQueue (id INTEGER PRIMARY KEY)")
+        conn.execute("INSERT INTO _syncScope VALUES ('main', 'synced', '{}', 1, 2)")
+        conn.commit(); conn.close()
+        log = sqlite3.connect(os.path.join(self.dir, "jigx.log.db"))
+        log.execute("CREATE TABLE _logMessages (id INTEGER PRIMARY KEY, timestamp INTEGER, state TEXT, message TEXT)")
+        log.commit(); log.close()
+
+    def tearDown(self):
+        shutil.rmtree(self.dir)
+
+    def set_scope(self, state, start, end=None):
+        conn = sqlite3.connect(self.db)
+        conn.execute("UPDATE _syncScope SET state=?, lastStartedAt=?, lastSyncedAt=?", (state, start, end))
+        conn.commit(); conn.close()
+
+    def test_sync_before_sign_out_is_dropped_and_the_run_restarts(self):
+        def drive():
+            time.sleep(0.1)
+            now = lambda: int(time.time() * 1000)
+            t0 = now(); self.set_scope("syncing", t0)           # the reloaded build syncs before sign-out
+            time.sleep(0.15)
+            log = sqlite3.connect(os.path.join(self.dir, "jigx.log.db"))
+            log.execute("INSERT INTO _logMessages (timestamp, state, message) VALUES (?, 'read', ?)",
+                        (now(), json.dumps({"level": "INFO", "category": "use-logout", "message": "Signing out"})))
+            log.commit(); log.close()
+            time.sleep(0.15)
+            t1 = now(); self.set_scope("syncing", t1)            # the sign-in sync
+            time.sleep(0.2)
+            self.set_scope("synced", t1, now())
+        worker = threading.Thread(target=drive); worker.start()
+        out = io.StringIO()
+        s = tl.track(self.db, "pre-1", os.path.join(self.dir, "runs"), scopes=["main"], interval=0.02, settle=0.2, timeout=10, stream=out)
+        worker.join()
+        self.assertEqual(s["result"], "ready")
+        self.assertEqual(s["restarts"], 1)
+        self.assertIn("Sign-out seen", out.getvalue())
+        self.assertLess(s["first_start_to_ready_s"], 0.4)       # the sign-in sync only
+
+    def test_armed_during_a_sync_ends_invalid(self):
+        self.set_scope("syncing", int(time.time() * 1000) - 5000)
+        def drive():
+            time.sleep(0.15)
+            self.set_scope("synced", int(time.time() * 1000) - 5000, int(time.time() * 1000))
+        worker = threading.Thread(target=drive); worker.start()
+        out = io.StringIO()
+        s = tl.track(self.db, "pre-1", os.path.join(self.dir, "runs"), scopes=["main"], interval=0.02, settle=0.1, timeout=5, stream=out)
+        worker.join()
+        self.assertEqual(s["result"], "invalid")
+        self.assertIn("was already syncing when tracking started", out.getvalue())
+
+    def test_other_solution_syncing_is_named(self):
+        other = os.path.join(self.dir, "jigx.solution.___last-used___.1111.db")
+        open(other, "w").close()
+        self.assertEqual(tl.other_solutions_busy(self.db, 0), ["last-used"])
+        self.assertEqual(tl.other_solutions_busy(self.db, time.time() * 1000 + 60000), [])
+
 class AndroidReadTest(unittest.TestCase):
     def test_android_hash_warning_counts(self):
         logs = [{"level": "WARNING", "category": "get-entity-id", "message": "Missing entity id, falling back to hash"},

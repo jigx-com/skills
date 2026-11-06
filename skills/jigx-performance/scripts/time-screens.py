@@ -32,6 +32,19 @@ Spec (screens.json):
       "tap": {"text": "\\\\d{6}-\\\\d+", "index": 0}, "ready": "Appointment Details",
       "after": [{"tap": "Back"}, {"tap": "Home"}]}]}
 
+Every warm run starts from the same place: the app is brought to the front, then the spec's
+optional top-level "reset" steps run (untimed), e.g. a tap on the Home tab, so a run that
+failed halfway cannot break the next one. After a failed run the app is also restarted
+before the next run, and a screen that fails twice in a row is skipped for the rest of the
+round. Ids beat texts for navigation: a pushed screen's back button is `<jig-id>.back.icon`
+(list screens: `navigation-bar-extended.back-button.icon`), a tab is
+`tab-bar.<uuid>-<name>`, and a tab's text starts with its icon glyph, so match it with
+`.*Home`, not `Home`. `maestro hierarchy` prints every id on the screen.
+
+Maestro's first iOS run builds and installs its driver (a minute or two), so an untimed
+warm-up run goes first (--no-warmup skips it); a run that takes longer than its timeout is
+recorded as failed, and results are saved after every run, so nothing is lost.
+
 `tap`, `ready` and `wait` take a text regex (Maestro matches text as a regex) or an
 object with "text" or "id" and an optional "index"; {"gone": "<regex>"} waits until that
 text has disappeared (e.g. a "Preparing your data" banner). Other steps: {"scroll": true},
@@ -40,8 +53,8 @@ one element holding all its texts, so `ready` and `wait` match anywhere in an el
 place (setup should get there from the app's home) and leave from it (after).
 
 Examples:
-  python3 time-screens.py screens.json --label pre --runs 3 --out perf-review/screens
-  python3 time-screens.py screens.json --label post --runs 3 --out perf-review/screens --compare pre
+  python3 time-screens.py screens.json --label pre --runs 3 --out <review>/screens
+  python3 time-screens.py screens.json --label post --runs 3 --out <review>/screens --compare pre
   python3 time-screens.py screens.json --label pre-android --platform android --device emulator-5554
   python3 time-screens.py screens.json --print-flow appointments-list
 """
@@ -59,6 +72,8 @@ import tempfile
 
 MARK = "JIGX_SCREEN"
 TIMEOUT_MS = 30000
+WARMUP_S = 300
+MAX_FAILS_IN_A_ROW = 2
 
 
 def contains(regex):
@@ -101,8 +116,9 @@ def steps(value, platform):
     return value or []
 
 
-def flow(app_id, screen, platform="ios"):
-    """The Maestro flow for one timed run of one screen."""
+def flow(app_id, screen, platform="ios", reset=None, restart=False):
+    """The Maestro flow for one timed run of one screen. reset: steps that bring the app back to
+    the start screen before every warm run; restart: stop the app first (after a failed run)."""
     if not re.fullmatch(r"[\w.-]+", screen["name"]):
         raise ValueError(f"screen name {screen['name']!r}: use letters, digits, - and _")
     lines = [f"appId: {app_id}", "---"]
@@ -110,7 +126,9 @@ def flow(app_id, screen, platform="ios"):
     if cold:
         lines += ["- stopApp"]
     else:
-        lines += ["- launchApp:", "    stopApp: false"]
+        lines += (["- stopApp"] if restart else []) + ["- launchApp:", "    stopApp: false"]
+        for s in steps(reset, platform):
+            lines += step_yaml(s, platform)
     for s in steps(screen.get("setup"), platform):
         lines += step_yaml(s, platform)
     lines += ["- evalScript: ${output.t0 = Date.now()}"]
@@ -127,14 +145,18 @@ def parse_ms(text, name):
     return int(m.group(1)) if m else None
 
 
-def run_once(app_id, screen, maestro, device=None, platform="ios"):
+def run_once(app_id, screen, maestro, device=None, platform="ios", reset=None, restart=False, timeout_s=None):
     with tempfile.TemporaryDirectory(prefix="jigx-screen-") as tmp:
         path = os.path.join(tmp, "flow.yaml")
         with open(path, "w", encoding="utf-8") as f:
-            f.write(flow(app_id, screen, platform))
+            f.write(flow(app_id, screen, platform, reset, restart))
         cmd = [maestro] + (["--device", device] if device else []) + ["test", path, "--debug-output", os.path.join(tmp, "debug")]
         env = dict(os.environ, MAESTRO_CLI_NO_ANALYTICS="1")
-        proc = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=TIMEOUT_MS / 1000 * 4)
+        timeout_s = timeout_s or TIMEOUT_MS / 1000 * 4
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=timeout_s)
+        except subprocess.TimeoutExpired:
+            return None, f"Maestro did not finish within {timeout_s:.0f} s"
         text = proc.stdout + proc.stderr
         # Maestro nests its logs under a hidden .maestro/ folder, which glob skips.
         for root, _, files in os.walk(os.path.join(tmp, "debug")):
@@ -259,13 +281,14 @@ def main(argv=None):
     p.add_argument("spec")
     p.add_argument("--label", default="run")
     p.add_argument("--runs", type=int, default=3)
-    p.add_argument("--out", default="perf-review/screens")
+    p.add_argument("--out", default=os.path.expanduser("~/jigx-perf-reviews/screens"), help="the review folder's screens/ (preflight.py prints the review folder); never inside the solution repo")
     p.add_argument("--only", help="comma-separated screen names")
     p.add_argument("--compare", help="label of an earlier run in --out to compare with")
     p.add_argument("--app-id", help="bundle id or Android package; default: the spec's appId (or appIdAndroid), else the one com.jigx.* app on the device")
     p.add_argument("--platform", choices=["ios", "android"], help="default: android when --device is an adb serial or no iOS Simulator is booted and adb sees a device")
     p.add_argument("--device", help="simulator UDID or adb serial when several are connected")
     p.add_argument("--print-flow", metavar="SCREEN", help="print the generated Maestro flow for one screen and exit")
+    p.add_argument("--no-warmup", action="store_true", help="skip the untimed first run that lets Maestro install its driver")
     args = p.parse_args(argv)
     with open(args.spec, encoding="utf-8") as f:
         spec = json.load(f)
@@ -276,7 +299,7 @@ def main(argv=None):
     plat = args.platform or spec.get("platform") or (None if args.print_flow else detect_platform(args.device)) or "ios"
     app_id = args.app_id or (spec.get("appIdAndroid") if plat == "android" else None) or spec.get("appId")
     if args.print_flow:
-        print(flow(app_id or "<appId>", next(s for s in spec["screens"] if s["name"] == args.print_flow), plat), end="")
+        print(flow(app_id or "<appId>", next(s for s in spec["screens"] if s["name"] == args.print_flow), plat, spec.get("reset")), end="")
         return 0
     app_id = app_id or detect_app(plat, args.device)
     if not app_id:
@@ -287,22 +310,40 @@ def main(argv=None):
                 "curl -Ls https://get.maestro.mobile.dev | bash (needs Java 17+)")
     print(f"Timing on {plat} ({args.device or 'the only device'}), app {app_id}", file=sys.stderr, flush=True)
     version = subprocess.run([maestro, "--version"], capture_output=True, text=True).stdout.strip().splitlines()[-1:] or ["?"]
+    os.makedirs(args.out, exist_ok=True)
+    reset = spec.get("reset")
     results = {s["name"]: [] for s in screens}
-    # Cold starts run after every other screen: a screen timed right after one meets an app
-    # that is still starting, and fails or reads slow.
+    device_desc = describe_device(plat, args.device)
+
+    def result_now():
+        return {"label": args.label, "appId": app_id, "maestro": version[0], "runs": args.runs, "platform": plat,
+                "device": device_desc, "recorded": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+                "screens": summarise(results)}
+
     warm = [s for s in screens if s.get("start") != "cold"]
     cold = [s for s in screens if s.get("start") == "cold"]
+    if warm and not args.no_warmup:
+        print("Warm-up run (untimed; Maestro's first iOS run installs its driver)", file=sys.stderr, flush=True)
+        _, err = run_once(app_id, warm[0], maestro, args.device, plat, reset, timeout_s=WARMUP_S)
+        if err:
+            print(f"warm-up: {err}", file=sys.stderr, flush=True)
+    restart = False
+    # Cold starts run after every other screen: a screen timed right after one meets an app
+    # that is still starting, and fails or reads slow.
     for group in (warm, cold):
         for i in range(args.runs):
             for s in group:
-                ms, err = run_once(app_id, s, maestro, args.device, plat)
-                results[s["name"]].append({"run": i + 1, "ms": ms, **({"error": err} if err else {})})
+                runs = results[s["name"]]
+                if len(runs) >= MAX_FAILS_IN_A_ROW and all(r["ms"] is None for r in runs[-MAX_FAILS_IN_A_ROW:]):
+                    runs.append({"run": i + 1, "ms": None, "error": f"skipped after {MAX_FAILS_IN_A_ROW} failed runs in a row"})
+                    continue
+                ms, err = run_once(app_id, s, maestro, args.device, plat, reset, restart)
+                restart = ms is None
+                runs.append({"run": i + 1, "ms": ms, **({"error": err} if err else {})})
                 print(f"{s['name']} run {i + 1}: " + (f"{ms} ms" if ms is not None else f"failed ({err})"), file=sys.stderr, flush=True)
-    result = {"label": args.label, "appId": app_id, "maestro": version[0], "runs": args.runs, "platform": plat,
-              "device": describe_device(plat, args.device),
-              "recorded": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
-              "screens": summarise(results)}
-    os.makedirs(args.out, exist_ok=True)
+                with open(os.path.join(args.out, f"{args.label}.partial.json"), "w", encoding="utf-8") as f:
+                    json.dump(result_now(), f, indent=2)
+    result = result_now()
     comparison = None
     if args.compare:
         with open(os.path.join(args.out, f"{args.compare}.json"), encoding="utf-8") as f:
@@ -313,6 +354,10 @@ def main(argv=None):
         result["comparison"] = comparison
     with open(os.path.join(args.out, f"{args.label}.json"), "w", encoding="utf-8") as f:
         json.dump(result, f, indent=2)
+    try:
+        os.remove(os.path.join(args.out, f"{args.label}.partial.json"))
+    except OSError:
+        pass
     text = report(result, comparison)
     with open(os.path.join(args.out, f"{args.label}.md"), "w", encoding="utf-8") as f:
         f.write(text)

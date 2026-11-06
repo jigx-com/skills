@@ -23,7 +23,7 @@ section, and what was not measured. With only the before files it writes the ove
 Read references/customer-review.md.
 
 Example:
-  python3 review-report.py perf-review --solution my-solution
+  python3 review-report.py <review> --solution my-solution
 """
 import argparse
 import glob
@@ -65,6 +65,8 @@ CODE_SECTION = {
 
 def read(folder, *parts):
     path = os.path.join(folder, *parts)
+    if not os.path.exists(path) and parts[-1] == "static.json":
+        path = os.path.join(folder, *parts[:-1], "audit.json")  # the name an older SKILL.md used
     if not os.path.exists(path):
         return None
     with open(path, encoding="utf-8") as f:
@@ -357,10 +359,10 @@ def report(folder, solution=None):
 
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("folder", nargs="?", default="perf-review")
+    p.add_argument("folder", nargs="?", default=os.path.expanduser("~/jigx-perf-reviews"))
     p.add_argument("--solution")
     args = p.parse_args(argv)
-    if not os.path.exists(os.path.join(args.folder, "before", "static.json")):
+    if not any(os.path.exists(os.path.join(args.folder, "before", n)) for n in ("static.json", "audit.json")):
         p.error(f"{args.folder}/before/static.json is missing; capture the baseline first")
     text = report(args.folder, args.solution)
     with open(os.path.join(args.folder, "report.md"), "w", encoding="utf-8") as f:

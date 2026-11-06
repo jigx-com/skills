@@ -151,9 +151,18 @@ def audit_needs(sol):
     return missing
 
 
+def review_folder(folder, sol, g):
+    """Where the review's files go: outside the solution repo, one folder per solution and branch."""
+    name = sol["name"] or os.path.basename(os.path.abspath(folder))
+    branch = g["branch"] if g and g["branch"] != "detached HEAD" else (g["commit"].split()[0] if g and g["commit"] else "no-git")
+    slug = lambda v: re.sub(r"[^\w.-]+", "-", v).strip("-") or "x"
+    return os.path.join(os.path.expanduser("~/jigx-perf-reviews"), slug(name), slug(branch))
+
+
 def code_only(folder):
-    sol = solution(folder)
-    return {"folder": os.path.abspath(folder), "solution": sol, "git": git(folder), "audit_needs": audit_needs(sol)}
+    sol, g = solution(folder), git(folder)
+    return {"folder": os.path.abspath(folder), "solution": sol, "git": g, "audit_needs": audit_needs(sol),
+            "review_folder": review_folder(folder, sol, g)}
 
 
 def preflight(folder):
@@ -168,7 +177,8 @@ def preflight(folder):
            "emulator": bool(sdk_tool(sdk, "emulator", "emulator", name="emulator")),
            "sdkmanager": bool(sdk_tool(sdk, "cmdline-tools", "latest", "bin", "sdkmanager", name="sdkmanager")),
            "avds": avds(), "android_other": other}
-    return {"folder": os.path.abspath(folder), "solution": solution(folder), "git": git(folder),
+    sol, g = solution(folder), git(folder)
+    return {"folder": os.path.abspath(folder), "solution": sol, "git": g, "review_folder": review_folder(folder, sol, g),
             "ios": booted, "android": devices, "tools": tools(), "env": env}
 
 
@@ -250,6 +260,8 @@ def head(r):
     lines = [f"Solution: {s['name'] or '?'} ({s['type'] or 'no index.jigx or src/app.ts here'}) in {r['folder']}"]
     lines.append(f"Branch: {g['branch']} at {g['commit']}" + (f", {g['uncommitted']} uncommitted change(s)" if g["uncommitted"] else ", clean")
                  if g else "Branch: not a git checkout")
+    if r.get("review_folder"):
+        lines.append(f"Review folder: {r['review_folder']} (outside the repo; nothing is written into the checkout)")
     return lines
 
 

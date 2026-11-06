@@ -16,7 +16,7 @@ Exits 1 when the total time regressed past the threshold or any run did not reac
 ready. Read references/run-and-track.md.
 
 Example:
-  python3 compare-runs.py perf-runs --before pre --after post
+  python3 compare-runs.py <review>/runs --before pre --after post
 """
 import argparse
 import glob
@@ -125,7 +125,7 @@ def markdown(report):
 
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("folder", nargs="?", default="perf-runs")
+    p.add_argument("folder", nargs="?", default=os.path.expanduser("~/jigx-perf-reviews/runs"))
     p.add_argument("--before", default="pre")
     p.add_argument("--after", default="post")
     p.add_argument("--threshold", type=float, default=10.0, help="percent slowdown to flag")
