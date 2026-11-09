@@ -27,6 +27,16 @@ reloads can sync once before the sign-out). Armed while a sync was already runni
 run ends "invalid" once that sync finishes: arm first, then sign in. While nothing has
 started it says when the app is syncing another solution instead.
 
+Each sign-in run needs a fresh sign-in: start the tracker, then sign out of the app and
+sign in again (or sign in for the first time). With --scopes, names that match no scope are
+reported together with the scope ids the app does have (the sync actions' instanceIds, not
+the names of the progress datasources).
+
+--copy-db OUT makes a copy of the solution database for time-queries.mjs and the row-count
+check: through SQLite's backup, so rows still in the -wal file are included (a plain cp
+leaves them out and gives an empty database), and switched out of WAL mode so it opens
+read-only on its own.
+
 Only entry states are kept from `details`: it also holds function parameters,
 which can carry URLs and credentials. Log lines keep level, category and a
 redacted message; `additionalParameters` is never read.
@@ -43,6 +53,7 @@ Examples:
   python3 track-load.py --solution my-solution-test --wait --scopes sync-base,sync-lookups --label pre-2
   python3 track-load.py --db path/to/jigx.solution.___x___.<uuid>.db --scopes sync-base,sync-lookups
   python3 track-load.py --android --solution my-solution-test --wait --label pre-android-1
+  python3 track-load.py --solution my-solution-test --copy-db <review>/before/device.db
 """
 import argparse
 import contextlib
@@ -141,6 +152,50 @@ class AdbDb:
 
 
 SIGN_OUT = re.compile(r"signing out", re.I)
+
+
+def copy_db(db, out):
+    """A self-contained copy of a solution database: SQLite's backup (includes the -wal file),
+    then out of WAL mode so it opens read-only without -wal and -shm files. Returns its row count."""
+    os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
+    for suffix in ("", "-wal", "-shm"):
+        with contextlib.suppress(FileNotFoundError):
+            os.remove(out + suffix)
+    if db.startswith("adb:"):
+        serial, device_path = db[4:].split(":", 1)
+        tmp = "/data/local/tmp/jigx-perf-copy.db"
+        # one string: the device shell would split ".backup <file>" into two arguments
+        proc = subprocess.run([adb(), "-s", serial, "shell", f"sqlite3 '{device_path}' '.backup {tmp}'"],
+                              capture_output=True, text=True, timeout=120)
+        if proc.returncode or "Error" in proc.stderr:
+            raise SystemExit(f"backup on the emulator failed: {proc.stderr.strip()}")
+        subprocess.run([adb(), "-s", serial, "pull", tmp, out], capture_output=True, text=True, timeout=300, check=True)
+        subprocess.run([adb(), "-s", serial, "shell", "rm", "-f", tmp], capture_output=True, timeout=30)
+    else:
+        with contextlib.closing(sqlite3.connect(f"file:{db}?mode=ro", uri=True)) as src, \
+                contextlib.closing(sqlite3.connect(out)) as dst:
+            src.backup(dst)
+    with contextlib.closing(sqlite3.connect(out)) as conn:
+        conn.execute("PRAGMA journal_mode=DELETE")
+        # data tables only: the runtime's own (_syncScope, __migrations) exist before any data does
+        tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table' "
+                                             "AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\' AND name NOT LIKE '\\_%' ESCAPE '\\'")]
+        return sum(conn.execute(f'SELECT COUNT(*) FROM "{t}"').fetchone()[0] for t in tables)
+
+
+def unknown_scopes(state, scopes, armed=0):
+    """Named --scopes that cannot be a scope of this run, so it would never reach ready. A scope's
+    row may appear only when it first starts, so a missing name counts only when none of the
+    named scopes exist while others have started since arming, or when every named scope that
+    does exist has finished this run."""
+    have = state["scopes"]
+    missing = [s for s in scopes if s not in have]
+    if not missing or not any(fresh(v, armed) for v in have.values()):
+        return []
+    present = [have[s] for s in scopes if s in have]
+    if not present or all(fresh(v, armed) and v["state"] == "synced" for v in present):
+        return missing
+    return []
 
 
 def file_id(path):
@@ -482,7 +537,7 @@ def summarise(label, db, samples, result, armed, ready_at, logs, final, scopes):
     }
 
 
-def track(db, label, out, tables=(), scopes=(), interval=0.25, settle=5.0, timeout=900.0, stream=sys.stdout):
+def track(db, label, out, tables=(), scopes=(), interval=0.25, settle=5.0, timeout=900.0, stream=sys.stdout, unknown_wait=10.0):
     os.makedirs(out, exist_ok=True)
     log_db = os.path.join(os.path.dirname(db), "jigx.log.db")
     armed = now_ms()
@@ -491,9 +546,10 @@ def track(db, label, out, tables=(), scopes=(), interval=0.25, settle=5.0, timeo
     _, last_log = read_logs(log_db, 0, armed)
     result, ready_since, ready_at, final = "timeout", None, None, None
     started_at, restarts, before_arming, idle_since, others_checked = armed, 0, set(), None, 0
-    announced = set()
+    announced, unknown_told, unknown_since = set(), set(), None
     inode = file_id(db)
-    print(f"Tracking {solution_name(db)} as '{label}'. Start the load now (log in, refresh or open the screen).",
+    print(f"Tracking {solution_name(db)} as '{label}'. Start the load now: for a sign-in, sign out of the app and "
+          "sign in again (every run needs a fresh sign-in); otherwise refresh or open the screen.",
           file=stream, flush=True)
     with open(os.path.join(out, f"{label}-samples.jsonl"), "w", encoding="utf-8") as jsonl:
         while now_ms() - started_at < timeout * 1000:
@@ -527,6 +583,16 @@ def track(db, label, out, tables=(), scopes=(), interval=0.25, settle=5.0, timeo
                 jsonl.write(json.dumps({"at": iso(now_ms()), "t": round(t, 3), **state}) + "\n")
                 jsonl.flush()
                 print(live_line(t, state, scopes, armed), file=stream, flush=True)
+            # A named scope's row can appear only when it starts (the one after it in a chain):
+            # warn only when nothing is syncing and the names still match nothing after a while.
+            idle = not any(v["state"] in ("syncing", "interrupted") for v in state["scopes"].values())
+            missing = [s for s in unknown_scopes(state, scopes, armed) if s not in unknown_told] if idle else []
+            unknown_since = (unknown_since or now_ms()) if missing else None
+            if missing and now_ms() - unknown_since >= unknown_wait * 1000:
+                unknown_told.update(missing)
+                print(f"{t:7.2f}s  No scope {', '.join(missing)} in this solution, so the run cannot reach ready. "
+                      f"Scopes here: {', '.join(sorted(state['scopes']))}. Stop (Ctrl-C) and pass those to --scopes.",
+                      file=stream, flush=True)
             st = status(state, scopes, armed)
             if st == "failed":
                 result = "failed"
@@ -612,6 +678,7 @@ def main(argv=None):
     p.add_argument("--interval", type=float, default=0.25)
     p.add_argument("--settle", type=float, default=5.0, help="seconds ready must hold before stopping")
     p.add_argument("--timeout", type=float, default=900.0)
+    p.add_argument("--copy-db", metavar="OUT", help="copy the solution database to OUT (rows in the -wal file included) and exit")
     args = p.parse_args(argv)
     android = android_serial(args.android) if args.android else None
     if android and args.interval == 0.25:
@@ -644,6 +711,13 @@ def main(argv=None):
         db = found[0]
     if not db:
         p.error("give --db or --solution (see --list)")
+    if args.copy_db:
+        rows = copy_db(db, args.copy_db)
+        print(f"Copied {solution_name(db)} to {args.copy_db}: {rows} data rows")
+        if not rows:
+            print("The copy has no data rows: sign in and let the sync finish first.", file=sys.stderr)
+            return 1
+        return 0
     scopes = [s for s in args.scopes.split(",") if s]
     summary = track(db, args.label, args.out, args.table, scopes, args.interval, args.settle, args.timeout)
     return 0 if summary["result"] == "ready" else 1

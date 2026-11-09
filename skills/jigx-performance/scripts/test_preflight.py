@@ -117,12 +117,18 @@ class PreflightTest(unittest.TestCase):
             pf.run = orig
         self.assertIn("Node 18+", needs[0]["problem"])
 
-    def test_installed_java_17_is_pointed_at_not_reinstalled(self):
-        r = report(tools={"java": 11, "java_ok": False, "java_home_17": "/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home"})
-        step = [s for s in pf.setup_steps(r) if "Java" in s["problem"]][0]
-        self.assertIn("installed but not used", step["problem"])
-        self.assertIn('export JAVA_HOME="/opt/homebrew/opt/openjdk@17', step["fix"])
-        self.assertNotIn("brew install", step["fix"])
+    def test_installed_java_17_is_used_not_reinstalled_and_the_profile_is_left_alone(self):
+        # A tester's ~/.zshrc pinned Java 11 on purpose: the fix must not edit it
+        home = "/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home"
+        r = report(tools={"java": 11, "java_ok": False, "java_home_17": home})
+        self.assertFalse([s for s in pf.setup_steps(r) if "Java" in s["problem"]])
+        text = pf.text(r)
+        self.assertIn(f"runs Maestro with the Java 17+ in {home}", text)
+        self.assertNotIn("zshrc", text)
+        no_brew = report(tools={"java": 11, "java_ok": False, "java_home_17": home, "brew": False})
+        self.assertFalse([s for s in pf.setup_steps(no_brew) if "Homebrew" in s["problem"]])
+        none = report(tools={"java": 11, "java_ok": False, "java_home_17": None})
+        self.assertIn("brew install openjdk@17", [s for s in pf.setup_steps(none) if "Java" in s["problem"]][0]["fix"])
 
 def android_steps(r):
     return [s for s in pf.setup_steps(r) if s["for"] == "Android"]

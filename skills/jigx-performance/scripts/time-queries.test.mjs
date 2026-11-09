@@ -1,6 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {atScale, collect, compareTimings, growth, paramNames, sampleQueries, scaleDatabase, sqlLiterals, timeSolution} from './time-queries.mjs';
+import {atScale, collect, compareTimings, dataKeys, growth, guessParam, paramNames, sampleQueries, scaleDatabase, sqlLiterals, timeSolution} from './time-queries.mjs';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import {spawnSync} from 'node:child_process';
 
 const sqlite = await import('node:sqlite').catch(() => null);
 const ds = (query, extra = {}) => ({type: 'datasource.sqlite', options: {entities: ['orders'], query, rewriteQuery: false, ...extra}});
@@ -112,4 +116,45 @@ test('NULL-parameter timings are not measurements; index names lose their quotin
   const app = {actions: {a: step('CREATE INDEX IF NOT EXISTS `idx_tasks_trim` ON [default/tasks] (trim(id))'),
                          b: step('CREATE INDEX IF NOT EXISTS idx_tasks_trim ON [default/tasks] (trim(id))')}};
   assert.deepEqual(collect(app).indexes.map(i => i.name), ['idx_tasks_trim']);
+});
+
+test('a parameter nothing samples is guessed from a same-named column: the busiest record', {skip: !sqlite && 'node:sqlite needs Node 22.5+'}, () => {
+  const db = new sqlite.DatabaseSync(':memory:');
+  db.exec('CREATE TABLE [default/photologs] (id TEXT PRIMARY KEY, data TEXT); CREATE TABLE _syncScope (id TEXT, state TEXT)');
+  const add = db.prepare('INSERT INTO [default/photologs] VALUES (?, ?)');
+  ['A', 'B', 'B', 'B', 'C'].forEach((p, i) => add.run(`l${i}`, JSON.stringify({ProjectID: p, LogNbr: i})));
+  assert.ok(!dataKeys(db).some(k => k.table === '_syncScope'));
+  assert.deepEqual(guessParam(db, 'selectedProject'), {value: 'B', from: 'default/photologs.ProjectID', rows: 3});
+  assert.equal(guessParam(db, 'searchText'), null);
+  // the query reads the project through solution state, so sampling cannot see it; the guess binds it
+  const app = {datasources: {logs: ds("SELECT id FROM [default/photologs] WHERE instr(json_extract(data, '$.ProjectID'), @projectId) > 0", {entities: ['default/photologs']})}};
+  const r = timeSolution(app, db, {runs: 1});
+  assert.equal(r.queries[0].rows, 3);
+  assert.deepEqual(r.queries[0].guessed, ['projectId']);
+  assert.equal(r.queries[0].nullParams, undefined);
+  assert.deepEqual(Object.values(r.guesses), [{name: 'projectId', value: 'B', from: 'default/photologs.ProjectID', rows: 3}]);
+  // a key in the query's own table wins over a busier one elsewhere
+  db.exec('CREATE TABLE [default/other] (id TEXT, data TEXT)');
+  for (let i = 0; i < 9; i++) db.prepare('INSERT INTO [default/other] VALUES (?, ?)').run(`o${i}`, JSON.stringify({ProjectID: 'Z'}));
+  assert.equal(guessParam(db, 'projectId', undefined, ['default/photologs']).value, 'B');
+  assert.equal(guessParam(db, 'projectId').value, 'Z');
+  // a guess that returns no rows timed nothing: not a measurement
+  const none = timeSolution({datasources: {x: ds("SELECT id FROM [default/photologs] WHERE json_extract(data, '$.LogNbr') = 99 AND instr(json_extract(data, '$.ProjectID'), @projectId) > 0", {entities: ['default/photologs']})}}, db, {runs: 1});
+  assert.equal(none.queries[0].rows, 0);
+  assert.equal(none.queries[0].nullParams, true);
+  // a per-record count returns one row of 0 with its record NULL: that is no data, so it is guessed too
+  const count = timeSolution({datasources: {c: ds("SELECT count(*) AS n FROM [default/photologs] WHERE instr(json_extract(data, '$.ProjectID'), @projectId) > 0", {entities: ['default/photologs']})}}, db, {runs: 1});
+  assert.deepEqual(count.queries[0].guessed, ['projectId']);
+});
+
+test('an empty database copy stops with how to copy it', {skip: !sqlite && 'node:sqlite needs Node 22.5+'}, () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'jigx-empty-'));
+  const empty = path.join(dir, 'copy.db');
+  const db = new sqlite.DatabaseSync(empty);
+  db.exec("CREATE TABLE orders (id TEXT, data TEXT); CREATE TABLE __migrations (id TEXT); INSERT INTO __migrations VALUES ('1')");
+  db.close();  // the runtime's own table has a row, the data table none: still empty
+  fs.writeFileSync(path.join(dir, 'output.json'), JSON.stringify({datasources: {a: ds('SELECT id FROM orders')}}));
+  const out = spawnSync(process.execPath, [new URL('./time-queries.mjs', import.meta.url).pathname, path.join(dir, 'output.json'), '--db', empty], {encoding: 'utf8'});
+  assert.equal(out.status, 2);
+  assert.match(out.stderr, /has no data rows .*--copy-db/s);
 });

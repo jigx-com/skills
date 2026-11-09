@@ -212,16 +212,15 @@ def setup_steps(r):
     Steps the user needs sudo or a GUI for say so; device-setup.md has the detail."""
     t, e, steps = r["tools"], r["env"], []
     add = lambda area, problem, fix: steps.append({"for": area, "problem": problem, "fix": fix})
-    if not t.get("brew") and e["mac"] and (not t["node_ok"] or not t["maestro"] or not t["java_ok"]):
+    java_missing = not t["java_ok"] and not t.get("java_home_17")
+    if not t.get("brew") and e["mac"] and (not t["node_ok"] or not t["maestro"] or java_missing):
         add("installs", "Homebrew is not installed",
             '/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"')
     if not t["node_ok"]:
         add("query timing", f"Node 22.5+ needed (have {t['node'] or 'none'})", "brew install node@22 (or: nvm install 22)")
-    if not t["java_ok"] and t.get("java_home_17"):
-        add("screen timing", f"Java 17+ is installed but not used (the active java is {t['java'] or 'none'}; "
-            "a JAVA_HOME in ~/.zshrc may pin the old one)",
-            f'export JAVA_HOME="{t["java_home_17"]}" PATH="{t["java_home_17"]}/bin:$PATH" (and fix the JAVA_HOME line in ~/.zshrc to keep it)')
-    elif not t["java_ok"]:
+    # A Java 17+ that is installed but not active is no step: time-screens.py runs Maestro with it
+    # (JAVA_HOME for that process only). The shell profile may pin the old Java on purpose.
+    if not t["java_ok"] and not t.get("java_home_17"):
         add("screen timing", f"Java 17+ needed for Maestro (have {t['java'] or 'none'})",
             "brew install openjdk@17, then: export JAVA_HOME=$(/usr/libexec/java_home -v 17)")
     if not t["maestro"]:
@@ -309,6 +308,10 @@ def text(r):
                 + (", ".join(d["jigx_apps"]) or "no Jigx app installed")
                 + ("" if d["rootable"] or not d["emulator"] else " (Google Play image: no adb root, so screens only, no sync timing)") for d in r["android"]]
     lines.append("Devices: " + ("; ".join(devices) if devices else "none booted or connected"))
+    t = r["tools"]
+    if not t["java_ok"] and t.get("java_home_17"):
+        lines.append(f"Java: {t['java'] or 'none'} is active; time-screens.py runs Maestro with the Java 17+ in "
+                     f"{t['java_home_17']} (nothing to change; to run maestro yourself: JAVA_HOME=\"{t['java_home_17']}\" maestro ...)")
     steps = setup_steps(r)
     if not steps:
         lines.append("Setup for timing: nothing missing")

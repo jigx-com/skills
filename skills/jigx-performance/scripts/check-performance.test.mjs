@@ -135,6 +135,32 @@ test('markdown report groups findings by priority and code with the fix once', (
   assert.doesNotMatch(md, /\| B \| Queries and indexes/);
 });
 
+test('heavy-focus names every table it syncs, so the count matches the list', () => {
+  const sync = entities => ({type: 'action.sync-entities', options: {entities}});
+  const app = {
+    actions: {a: {action: sync(['default/x', {entity: 'default/y'}])}, b: {action: sync([{entity: 'default/x'}])}},
+    jigs: {s: {type: 'jig.default', onFocus: {type: 'action.action-list', options: {actions: [
+      {type: 'action.execute-action', options: {action: 'a'}}, {type: 'action.execute-action', options: {action: 'b'}}]}}}},
+  };
+  const focus = checkPerformance(app).findings.find(f => f.code === 'heavy-focus');
+  assert.match(focus.message, /syncs 3 entities \(x, y; x more than once\) through a, b every time/);
+});
+
+test('priority counts leave out expression safety, as audit.md does', async () => {
+  const {spawnSync: run} = await import('node:child_process');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'jigx-counts-'));
+  const app = {jigs: {l: {type: 'jig.list', data: '=@ctx.datasources.rows', item: {type: 'component.list-item',
+    options: {title: '=$trim(@ctx.current.item.Description)', subtitle: '=@ctx.datasources.x.y'}}}}};
+  fs.writeFileSync(path.join(dir, 'output.json'), JSON.stringify(app));
+  const out = run(process.execPath, [new URL('./check-performance.mjs', import.meta.url).pathname, path.join(dir, 'output.json'),
+    '--report', path.join(dir, 'audit.md')], {encoding: 'utf8'});
+  const json = JSON.parse(out.stdout);
+  assert.equal(json.expressionSafety.medium, 1);
+  assert.equal(json.byPriority.medium, json.findings.filter(f => f.priority === 'medium' && f.code !== 'expression-may-throw').length);
+  assert.match(out.stderr, new RegExp(`${json.byPriority.medium} medium, ${json.byPriority.low} low, plus 1 expression-safety`));
+  assert.match(fs.readFileSync(path.join(dir, 'audit.md'), 'utf8'), new RegExp(`· ${json.byPriority.medium} medium ·`));
+});
+
 test('markdown report counts low findings by type unless listLow is set', () => {
   const low = (code, where) => ({priority: 'low', section: 'B', code, where, message: `m ${where}`, fix: 'Index a | b'});
   const findings = [low('unindexed-predicate', 'a.jigx'), low('unindexed-predicate', 'b.jigx'), low('order-by-unindexed', 'c.jigx'),
@@ -460,7 +486,7 @@ test('a fixed non-date filter is a full pull; one-record calls need no $select; 
   assert.ok(!full.some(m => /^me /.test(m)));
   assert.ok(!f.some(x => x.code === 'sync-no-select' && /whoami/.test(x.message)));
   const focus = f.find(x => x.code === 'heavy-focus');
-  assert.match(focus.message, /\(sync-appts\)/);
+  assert.match(focus.message, /syncs 1 entity \(appts\) through sync-appts every time/);
   assert.doesNotMatch(focus.message, /logout|full/);
 });
 

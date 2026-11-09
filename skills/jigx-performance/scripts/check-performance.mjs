@@ -698,12 +698,14 @@ export function checkPerformance(app, {stats = null, sources = {}} = {}) {
 
   // onFocus runs every time the screen is shown. Unguarded sync steps reached from it, through
   // execute-action up to three levels: how many entities they sync and which actions they run.
-  const focusSyncs = (node, depth = 0, out = {entities: 0, actions: new Set(), syncers: new Set()}, owner = null) => {
+  const focusSyncs = (node, depth = 0, out = {entities: 0, tables: [], actions: new Set(), syncers: new Set()}, owner = null) => {
     walk(node, v => {
       if (!v || typeof v !== 'object') return false;
       if (v.when !== undefined && v !== node) return false; // a guarded branch is fine
       if (v.type === 'action.sync-entities') {
-        out.entities += Math.max(1, asArray(v.options?.entities).length);
+        const list = asArray(v.options?.entities);
+        out.entities += Math.max(1, list.length);
+        for (const e of list) out.tables.push(String(typeof e === 'string' ? e : e?.entity ?? e?.name ?? '?').replace(/^default\//, ''));
         if (owner) out.syncers.add(owner); // the action that syncs, not a wrapper or a logout next to it
         return false;
       }
@@ -724,9 +726,13 @@ export function checkPerformance(app, {stats = null, sources = {}} = {}) {
     const syncers = [...f.syncers];
     const again = syncers.filter(a => startActions.has(a));
     const heavy = again.length > 0 || f.entities >= 5;
-    const what = syncers.length ? ` (${syncers.join(', ')})` : '';
+    // Name the tables, not only the actions: "8 entities (7 names)" read as a miscount.
+    const uniq = [...new Set(f.tables)];
+    const twice = uniq.filter(t => f.tables.filter(x => x === t).length > 1);
+    const tables = uniq.length ? ` (${uniq.slice(0, 8).join(', ')}${uniq.length > 8 ? ', …' : ''}${twice.length ? `; ${twice.join(', ')} more than once` : ''})` : '';
+    const what = syncers.length ? ` through ${syncers.join(', ')}` : '';
     add('heavy-focus', `$.jigs.${name}.onFocus`,
-      `Opening the screen syncs ${f.entities} ${f.entities === 1 ? 'entity' : 'entities'}${what} every time, with no when: guard` +
+      `Opening the screen syncs ${f.entities} ${f.entities === 1 ? 'entity' : 'entities'}${tables}${what} every time, with no when: guard` +
       (again.length ? `; ${again.join(', ')} is the same sync the app runs on start.` : '.'), heavy ? {priority: 'high'} : {});
   }
 
@@ -1026,17 +1032,25 @@ async function main() {
     const stats = dbPath ? await tableStats(dbPath) : null;
     const {findings, indexes} = checkPerformance(loaded.app, {stats, sources: loaded.sources});
     const count = s => findings.filter(x => x.severity === s).length;
-    const byCode = {}, byPriority = {high: 0, medium: 0, low: 0};
-    for (const f of findings) { byCode[f.code] = (byCode[f.code] ?? 0) + 1; byPriority[f.priority]++; }
+    // Priority counts leave out expression safety, which has its own block and count in audit.md,
+    // so the terminal, static.json and audit.md show the same numbers.
+    const byCode = {}, byPriority = {high: 0, medium: 0, low: 0}, expressionSafety = {medium: 0, low: 0};
+    for (const f of findings) {
+      byCode[f.code] = (byCode[f.code] ?? 0) + 1;
+      if (f.code === 'expression-may-throw') expressionSafety[f.priority] = (expressionSafety[f.priority] ?? 0) + 1;
+      else byPriority[f.priority]++;
+    }
+    const safetyTotal = Object.values(expressionSafety).reduce((a, b) => a + b, 0);
     const added = baselinePath ? newFindings(findings, JSON.parse(fs.readFileSync(baselinePath, 'utf8')).findings ?? []) : null;
     const gated = failOn ? (added ?? findings).filter(x => PRIORITIES.indexOf(x.priority) <= PRIORITIES.indexOf(failOn)) : [];
-    console.log(JSON.stringify({file, errors: count('error'), warnings: count('warning'), byPriority, byCode,
+    console.log(JSON.stringify({file, errors: count('error'), warnings: count('warning'), byPriority, expressionSafety, byCode,
       parseErrors: loaded.parseErrors, indexesFound: indexes, findings, ...(added && {newFindings: added}),
       limits: 'Static leads only. Confirm each with row/byte counts and a query plan (scripts/profile-query.py); this does not measure device timing.'}, null, 2));
     if (reportPath) {
       const title = loaded.app.title ?? loaded.app.name ?? path.basename(path.resolve(file));
       fs.writeFileSync(reportPath, markdownReport({title, findings, parseErrors: loaded.parseErrors, stats, listLow}));
-      console.error(`Report written to ${reportPath}: ${byPriority.high} high, ${byPriority.medium} medium, ${byPriority.low} low.`);
+      console.error(`Report written to ${reportPath}: ${byPriority.high} high, ${byPriority.medium} medium, ${byPriority.low} low` +
+        (safetyTotal ? `, plus ${safetyTotal} expression-safety findings (their own block).` : '.'));
     }
     if (added) console.error(`${added.length} finding(s) not in the baseline.`);
     for (const f of gated) console.error(`[${f.priority}] ${f.code} ${f.where}: ${f.message}`);

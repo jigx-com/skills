@@ -18,10 +18,15 @@ class TimeScreensTest(unittest.TestCase):
         lines = text.splitlines()
         start = lines.index("- evalScript: ${output.t0 = Date.now()}")
         self.assertLess(lines.index('- tapOn: "Appointments"'), start)
-        self.assertEqual(lines[start + 1], '- tapOn: {"text": "\\\\d{6}", "index": 0}')
+        # the element is waited for before the clock starts; the timed tap does not wait to settle
+        self.assertEqual(lines[start - 2], '    visible: {"text": "\\\\d{6}"}')
+        self.assertEqual(lines[start + 1], '- tapOn: {"text": "\\\\d{6}", "index": 0, "retryTapIfNoChange": false, "waitToSettleTimeoutMs": 200}')
         self.assertEqual(lines[start + 3], '    visible: {"id": "details"}')
         self.assertIn("JIGX_SCREEN detail ms=", lines[start + 5])
+        self.assertEqual(lines[start + 6], "- waitForAnimationToEnd:")
+        self.assertIn("JIGX_SCREEN detail settled=", lines[start + 8])
         self.assertEqual(lines[-1], '- tapOn: "Back"')
+        self.assertEqual(lines[lines.index('- tapOn: "Back"') - 2], '    visible: "Back"')
         with self.assertRaises(ValueError):
             ts.flow("x", {"name": "bad name", "tap": "a", "ready": "b"})
 
@@ -30,7 +35,7 @@ class TimeScreensTest(unittest.TestCase):
                   "after": {"android": [{"back": True}], "ios": [{"tap": "Back"}]}}
         android = ts.flow("com.jigx.app", screen, "android").splitlines()
         self.assertIn('    visible: "[\\\\s\\\\S]*(?:\\\\d{6}-\\\\d+)[\\\\s\\\\S]*"', android)
-        self.assertIn('- tapOn: "View Appointments"', android)  # taps stay exact
+        self.assertIn('- tapOn: {"text": "View Appointments", "retryTapIfNoChange": false, "waitToSettleTimeoutMs": 200}', android)  # taps stay exact
         self.assertEqual(android[-1], "- back")
         ios = ts.flow("com.jigx.app", screen, "ios").splitlines()
         self.assertIn('    visible: "\\\\d{6}-\\\\d+"', ios)
@@ -44,6 +49,7 @@ class TimeScreensTest(unittest.TestCase):
     def test_parses_the_logged_time(self):
         log = "Orchestra: JsConsole: JIGX_SCREEN detail ms=2121\nRun ${console.log('JIGX_SCREEN detail ms=' ...)}"
         self.assertEqual(ts.parse_ms(log, "detail"), 2121)
+        self.assertEqual(ts.parse_ms(log + "\nJsConsole: JIGX_SCREEN detail settled=8280", "detail", "settled"), 8280)
         self.assertIsNone(ts.parse_ms(log, "list"))
 
     def test_verdict_needs_runs_apart_and_a_real_difference(self):
@@ -51,6 +57,43 @@ class TimeScreensTest(unittest.TestCase):
         after = result({"same": [3254, 3440, 2978], "fast": [1900, 1950, 2000], "slow": [2500, 2600, 2550], "tiny": [1100, 1110, 1120]})
         verdicts = {r["screen"]: r["verdict"] for r in ts.compare(before, after)}
         self.assertEqual(verdicts, {"same": "same", "fast": "faster", "slow": "SLOWER", "tiny": "same"})
+
+    def test_runs_in_two_groups_are_unclear_not_same(self):
+        # Time-Tracking-V2 timecards list: a focus sync in some runs
+        before = result({"timecards": [3530, 1660, 1640]})
+        after = result({"timecards": [3620, 3490, 1550]})
+        row = ts.compare(before, after)[0]
+        self.assertEqual(row["verdict"], "unclear (runs overlap)")
+        self.assertEqual(row["after_runs"], [3620, 3490, 1550])
+        text = "\n".join(ts.comparison_lines([row], "## x"))
+        self.assertIn("3.53, 1.66, 1.64 → 3.62, 3.49, 1.55", text)
+
+    def test_report_names_what_each_screen_is_timed_until(self):
+        res = {"label": "pre", "device": "d", "appId": "a", "maestro": "2", "runs": 1,
+               "screens": ts.summarise({"logs": [{"run": 1, "ms": 1900, "settled_ms": 8280}]},
+                                       [{"name": "logs", "ready": {"id": "photo-log.number"}}])}
+        text = ts.report(res)
+        self.assertIn("| logs | `id photo-log.number` | 1.90 s | 1.90 | 8.28 s | 0 |", text)
+
+    def test_a_screen_that_never_settles_says_so(self):
+        res = {"label": "pre", "device": "d", "appId": "a", "maestro": "2", "runs": 1,
+               "screens": ts.summarise({"s": [{"run": 1, "ms": 1900, "never_settled": True}]}, [{"name": "s", "ready": "x"}])}
+        self.assertIn("did not settle in 15 s", ts.report(res))
+
+    def test_ids_drop_layout_noise(self):
+        tree = {"attributes": {"resource-id": "view.root"}, "children": [
+            {"attributes": {"resource-id": "tab-bar.1-home", "accessibilityText": "Home"}, "children": []},
+            {"attributes": {"resource-id": "icon.chevron"}},
+            {"attributes": {"resource-id": "add-time.back.icon"}},
+            {"attributes": {"resource-id": "timecard.card-1", "text": "Week 45"}, "children": [
+                {"attributes": {"resource-id": "timecard.card-1", "text": "Week 45"}}]},
+            {"attributes": {"text": "no id"}}]}
+        self.assertEqual(ts.screen_ids(tree), [("tab-bar.1-home", "Home"), ("add-time.back.icon", ""), ("timecard.card-1", "Week 45")])
+
+    def test_prepare_runs_once_as_its_own_flow(self):
+        text = ts.prepare_flow("com.jigx.app", [{"tap": {"id": "project.BUDGETBYM"}}])
+        self.assertIn('- tapOn: {"id": "project.BUDGETBYM"}', text)
+        self.assertTrue(text.startswith("appId: com.jigx.app\n---\n- launchApp:"))
 
     def test_one_successful_run_gives_no_verdict(self):
         before = result({"control": [2000, 2050, 2100]})
@@ -78,14 +121,15 @@ class TimeScreensTest(unittest.TestCase):
         with open(spec_path, "w") as f:
             json.dump({"appId": "com.jigx.app", "screens": [{"name": "a", "tap": "A", "ready": "x"}, {"name": "b", "tap": "B", "ready": "y"}]}, f)
         maestro = os.path.join(d, "maestro"); open(maestro, "w").close()
-        orig = (ts.subprocess.run, ts.shutil.which, ts.describe_device)
+        orig = (ts.subprocess.run, ts.shutil.which, ts.describe_device, ts.maestro_env)
         try:
+            ts.maestro_env = lambda: {}
             ts.subprocess.run = fake_run
             ts.shutil.which = lambda name: maestro
             ts.describe_device = lambda plat, dev=None: "test device"
             code = ts.main([spec_path, "--label", "pre", "--runs", "3", "--out", d, "--platform", "ios"])
         finally:
-            ts.subprocess.run, ts.shutil.which, ts.describe_device = orig
+            ts.subprocess.run, ts.shutil.which, ts.describe_device, ts.maestro_env = orig
         self.assertEqual(code, 1)
         with open(os.path.join(d, "pre.json")) as f:
             saved = json.load(f)
@@ -95,6 +139,34 @@ class TimeScreensTest(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(d, "pre.partial.json")))
         # warm-up + 2 tried runs per screen (the third is skipped), plus --version
         self.assertEqual(len(calls), 1 + 1 + 2 * 2)
+
+    def test_failed_prepare_times_nothing(self):
+        import json, subprocess, tempfile
+        calls = []
+        def fake_run(cmd, **kw):
+            calls.append(cmd)
+            if cmd[1:2] == ["--version"]:
+                return subprocess.CompletedProcess(cmd, 0, "2.12.1\n", "")
+            return subprocess.CompletedProcess(cmd, 1, "", "Element not found")
+        d = tempfile.mkdtemp()
+        spec_path = os.path.join(d, "screens.json")
+        with open(spec_path, "w") as f:
+            json.dump({"appId": "com.jigx.app", "prepare": [{"tap": {"id": "project.1"}}],
+                       "screens": [{"name": "a", "tap": "A", "ready": "x"}]}, f)
+        maestro = os.path.join(d, "maestro"); open(maestro, "w").close()
+        orig = (ts.subprocess.run, ts.shutil.which, ts.describe_device, ts.maestro_env)
+        try:
+            ts.maestro_env = lambda: {}
+            ts.subprocess.run = fake_run
+            ts.shutil.which = lambda name: maestro
+            ts.describe_device = lambda plat, dev=None: "test device"
+            code = ts.main([spec_path, "--label", "pre", "--out", d, "--platform", "ios"])
+        finally:
+            ts.subprocess.run, ts.shutil.which, ts.describe_device, ts.maestro_env = orig
+        self.assertEqual(code, 1)
+        self.assertEqual(len(calls), 2)  # --version, then the prepare flow; no warm-up, no screen
+        self.assertFalse(os.path.exists(os.path.join(d, "pre.json")))
+
 
 if __name__ == "__main__":
     unittest.main()

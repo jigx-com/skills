@@ -181,13 +181,19 @@ def timing_lines(comparison, pre=None):
     lines += [
              f"Medians of {len(comparison['before_runs'])} runs before and {len(comparison['after_runs'])} after "
              f"on {'; '.join(comparison['machine'])}.", ""]
-    moved = [r for r in rows[1:] if not r["metric"].startswith("total:") and r["change_pct"] is not None and r["verdict"] != "same"]
-    moved.sort(key=lambda r: r["change_pct"])
+    # Every step whose verdict says something; "same" and "within noise" are noise. The verdict
+    # goes with it: a bare -89% hides "not comparable", "unclear" or "parallel now".
+    moved = [r for r in rows[1:] if not r["metric"].startswith("total:") and r["change_pct"] is not None
+             and r["verdict"] not in ("same", "within noise")]
+    order = {"REGRESSION": 0, "improved": 1}
+    moved.sort(key=lambda r: (order.get(r["verdict"], 2), r["change_pct"]))
     if moved:
-        lines += ["| Step | Before | After | Change |", "| --- | ---: | ---: | ---: |"]
-        for r in moved[:8] + [r for r in moved[8:] if r["verdict"] == "REGRESSION"]:
-            lines.append(f"| {r['metric']} | {r['before_s']} s | {r['after_s']} s | {r['change_pct']}% |")
-        lines.append("")
+        runs = lambda vs: ", ".join(f"{v:g}" for v in vs or []) or "-"
+        lines += ["| Step | Before | After | Change | Verdict | Runs before → after |", "| --- | ---: | ---: | ---: | --- | --- |"]
+        for r in moved[:12] + [r for r in moved[12:] if r["verdict"] == "REGRESSION"]:
+            lines.append(f"| {r['metric']} | {r['before_s']} s | {r['after_s']} s | {r['change_pct']}% | {r['verdict']} | "
+                         f"{runs(r.get('before_runs'))} → {runs(r.get('after_runs'))} |")
+        lines += ["", "Steps that moved by less than the noise floor are left out (comparison.md lists every step).", ""]
     lines.append(f"Timeout for first snapshot: {comparison['snapshot_timeouts']['before']} → "
                  f"{comparison['snapshot_timeouts']['after']}. Runtime log errors: "
                  f"{comparison['log_errors']['before']} → {comparison['log_errors']['after']}."
@@ -241,6 +247,22 @@ def slowest(timings, kind):
     return max(rows, key=lambda r: r["ms"]) if rows else None
 
 
+def look(before, after, measured_after):
+    """The "where to look" note for both sides: a note that only held before says so."""
+    if not measured_after:
+        return before
+    if before == after:
+        return before
+    return "; ".join(x for x in (f"before: {before}" if before else "", f"after: {after or 'none'}") if x)
+
+
+def counts(static):
+    """'H high · M medium' and the expression-safety count, which audit.md keeps apart."""
+    pri = (static or {}).get("byPriority") or {}
+    safety = sum(((static or {}).get("expressionSafety") or {}).values())
+    return f"{pri.get('high', 0)} high · {pri.get('medium', 0)} medium" + (f" (+{safety} expression safety)" if safety else "")
+
+
 def overview(folder, pre, post, timings_before, timings_after, screens, static_before, static_after):
     """One row per area: the number that matters before, after, and where to look."""
     fmt_s = lambda v: "-" if v is None else f"{v} s"
@@ -248,33 +270,45 @@ def overview(folder, pre, post, timings_before, timings_after, screens, static_b
     for label, p, q in (("Sync, time to ready", pre, post), ("Sync on Android", load_runs(folder, "pre-android"), load_runs(folder, "post-android"))):
         if p:
             b, a = med([r.get("first_start_to_ready_s") for r in p]), med([r.get("first_start_to_ready_s") for r in q]) if q else None
-            top = sorted(((n, v) for n, v in entry_medians(p).items() if v is not None), key=lambda x: -x[1])[:1]
-            rows.append((label, fmt_s(b), fmt_s(a), f"slowest function: {top[0][0]} {top[0][1]} s" if top else ""))
+            def slowest_fn(runs):
+                top = sorted(((n, v) for n, v in entry_medians(runs).items() if v is not None), key=lambda x: -x[1])[:1]
+                return f"slowest function: {top[0][0]} {top[0][1]} s" if top else ""
+            rows.append((label, fmt_s(b), fmt_s(a), look(slowest_fn(p), slowest_fn(q) if q else "", bool(q))))
             busy = med([r.get("sync_busy_s") for r in p])
             if busy is not None:
-                repeated = sorted({sid for r in p for sid in r.get("repeated_scopes", [])})
+                def twice(runs):
+                    repeated = sorted({sid for r in runs for sid in r.get("repeated_scopes", [])})
+                    return f"synced more than once: {', '.join(repeated)}" if repeated else ""
                 rows.append((f"{label.split(',')[0]}, all sync work (also after ready)", fmt_s(busy),
-                             fmt_s(med([r.get("sync_busy_s") for r in q])) if q else "-",
-                             f"synced more than once: {', '.join(repeated)}" if repeated else ""))
+                             fmt_s(med([r.get("sync_busy_s") for r in q])) if q else "-", look(twice(p), twice(q) if q else "", bool(q))))
     for kind, label in (("queries", "Queries"), ("actions", "Actions (execute-sql)")):
         if timings_before:
             tot = lambda t: round(sum(r.get("ms") or 0 for r in (t or {}).get(kind, [])), 1)
-            top = slowest(timings_before, kind)
-            grow = sum(1 for r in timings_before.get("growth", []) if r["kind"] == kind and r["verdict"] == "GROWS FASTER")
+            def where(t):
+                if not t:
+                    return ""
+                top = slowest(t, kind)
+                grow = sum(1 for r in t.get("growth", []) if r["kind"] == kind and r["verdict"] == "GROWS FASTER")
+                return "; ".join(x for x in (f"slowest: `{top['where']}` {top['ms']} ms" if top else "",
+                                             f"{grow} grow faster than the data" if grow else "") if x)
             rows.append((f"{label}, {len(timings_before.get(kind, []))} in total", f"{tot(timings_before)} ms",
-                         f"{tot(timings_after)} ms" if timings_after else "-",
-                         (f"slowest: `{top['where']}` {top['ms']} ms" if top else "") + (f"; {grow} grow faster than the data" if grow else "")))
+                         f"{tot(timings_after)} ms" if timings_after else "-", look(where(timings_before), where(timings_after), bool(timings_after))))
     for label, (p, q) in screens.items():
         if p:
+            verdicts = {r["screen"]: r for r in ((q or {}).get("comparison") or {}).get("rows", [])}
             for name, s in p["screens"].items():
                 after = q["screens"].get(name, {}).get("median_ms") if q else None
+                v = verdicts.get(name)
+                note = ""
+                if v:
+                    note = v["verdict"] + (f": runs {', '.join(f'{x / 1000:.2f}' for x in v.get('before_runs', []))} → "
+                                           f"{', '.join(f'{x / 1000:.2f}' for x in v.get('after_runs', []))}"
+                                           if v["verdict"].startswith("unclear") else "")
                 rows.append((f"{label}: {name}", "-" if s["median_ms"] is None else f"{s['median_ms'] / 1000:.2f} s",
-                             "-" if after is None else f"{after / 1000:.2f} s", ""))
+                             "-" if after is None else f"{after / 1000:.2f} s", note))
     if static_before:
-        pri = static_before.get("byPriority", {})
-        pa = (static_after or {}).get("byPriority")
-        rows.append(("Audit findings", f"{pri.get('high', 0)} high · {pri.get('medium', 0)} medium",
-                     f"{pa['high']} high · {pa['medium']} medium" if pa else "-", "by section below; fixes in audit.md"))
+        rows.append(("Audit findings", counts(static_before), counts(static_after) if static_after else "-",
+                     "by section below; fixes in audit.md"))
     if not rows:
         return []
     return (["## Overview", "", "| Area | Before | After | Where to look |", "| --- | ---: | ---: | --- |"]
@@ -286,15 +320,23 @@ def screen_lines(pre, post):
     if not pre:
         return ["Not measured. Run time-screens.py with a screens.json (references/customer-review.md)."]
     fmt = lambda v: "-" if v is None else f"{v / 1000:.2f} s"
+    runs = lambda vs: ", ".join(f"{v / 1000:.2f}" for v in vs or []) or "-"
+    until = lambda s: (f"id {s['ready']['id']}" if isinstance(s.get("ready"), dict) and "id" in s["ready"]
+                       else str((s.get("ready") or {}).get("text", "-")) if isinstance(s.get("ready"), dict)
+                       else s.get("ready") or "-")
     if post and post.get("comparison"):
-        lines = ["| Screen | Before | After | Change | |", "| --- | ---: | ---: | ---: | --- |"]
-        lines += [f"| {r['screen']} | {fmt(r['before_ms'])} | {fmt(r['after_ms'])} | "
-                  f"{'-' if r['change_pct'] is None else str(r['change_pct']) + '%'} | {r['verdict']} |" for r in post["comparison"]["rows"]]
+        lines = ["| Screen | Timed until | Before | After | Change | | Runs before → after |",
+                 "| --- | --- | ---: | ---: | ---: | --- | --- |"]
+        lines += [f"| {r['screen']} | `{r.get('ready', '-')}` | {fmt(r['before_ms'])} | {fmt(r['after_ms'])} | "
+                  f"{'-' if r['change_pct'] is None else str(r['change_pct']) + '%'} | {r['verdict']} | "
+                  f"{runs(r.get('before_runs'))} → {runs(r.get('after_runs'))} |" for r in post["comparison"]["rows"]]
     else:
-        lines = ["| Screen | Median | Spread |", "| --- | ---: | ---: |"]
-        lines += [f"| {n} | {fmt(s['median_ms'])} | {'-' if s['spread_ms'] is None else str(s['spread_ms']) + ' ms'} |" for n, s in pre["screens"].items()]
+        lines = ["| Screen | Timed until | Median | Runs |", "| --- | --- | ---: | --- |"]
+        lines += [f"| {n} | `{until(s)}` | {fmt(s['median_ms'])} | {runs([r['ms'] for r in s.get('runs', []) if r.get('ms') is not None])} |"
+                  for n, s in pre["screens"].items()]
     return lines + ["", f"Tap to ready element on {pre['device']}, {pre['runs']} runs a screen; includes datasources, "
-                        "expressions and rendering, plus Maestro's overhead."]
+                        "expressions and rendering, plus Maestro's overhead. A screen's time covers what renders before its "
+                        "ready element, not what loads after it. unclear: the medians moved but the runs overlap; read the runs."]
 
 
 def report(folder, solution=None, timings=(None, None)):
@@ -330,8 +372,12 @@ def report(folder, solution=None, timings=(None, None)):
     pri = (read(folder, "before", "static.json") or {}).get("byPriority")
     if pri:
         after_pri = (after_static or {}).get("byPriority")
+        safety = lambda st: sum(((st or {}).get("expressionSafety") or {}).values())
+        sb, sa = safety(read(folder, "before", "static.json")), safety(after_static)
         lines += [f"Priority before: {pri['high']} high, {pri['medium']} medium, {pri['low']} low"
-                  + (f"; after: {after_pri['high']} high, {after_pri['medium']} medium, {after_pri['low']} low" if after_pri else "")
+                  + (f", plus {sb} expression-safety" if sb else "")
+                  + (f"; after: {after_pri['high']} high, {after_pri['medium']} medium, {after_pri['low']} low"
+                     + (f", plus {sa} expression-safety" if sa else "") if after_pri else "")
                   + ". The full list with locations and fixes is in `audit.md` (`check-performance.mjs --report`).", ""]
     if after is None:
         lines += ["Baseline only; nothing has been changed yet.", "",

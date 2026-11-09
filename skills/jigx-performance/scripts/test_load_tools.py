@@ -109,6 +109,47 @@ class TrackLoadTest(unittest.TestCase):
         self.assertNotIn("customer data", text)
         self.assertIn("Timeout for first snapshot", out.getvalue())
 
+    def test_copy_includes_rows_still_in_the_wal_file(self):
+        # A plain cp of a WAL database left the rows behind: time-queries saw "0 rows in 0 tables"
+        conn = sqlite3.connect(self.db)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA wal_autocheckpoint=0")
+        conn.executemany("INSERT INTO orders VALUES (?, '{}')", [(str(i),) for i in range(25)])
+        conn.commit()  # the rows stay in the -wal file while this connection is open
+        try:
+            self.assertTrue(os.path.getsize(self.db + "-wal") > 0)
+            out = os.path.join(self.dir, "copy", "device.db")
+            rows = tl.copy_db(self.db, out)
+            self.assertEqual(rows, 25)  # data rows: the 25 orders, not the runtime's _syncScope row
+            self.assertFalse(os.path.exists(out + "-wal"))
+            with sqlite3.connect(f"file:{out}?mode=ro", uri=True) as ro:  # opens on its own, read-only
+                self.assertEqual(ro.execute("SELECT COUNT(*) FROM orders").fetchone()[0], 25)
+                self.assertEqual(ro.execute("PRAGMA journal_mode").fetchone()[0], "delete")
+        finally:
+            conn.close()
+
+    def test_scope_names_that_match_nothing_are_reported_with_the_real_ones(self):
+        # Project Central: progress datasource names (identity-data) instead of the instanceIds (sync-identity)
+        state = {"scopes": {"sync-identity": {"state": "syncing", "startedAt": 5, "syncedAt": None, "entries": {}},
+                            "sync-data": {"state": "pending", "startedAt": None, "syncedAt": None, "entries": {}}},
+                 "queue": 0, "counts": {}}
+        # sync-identity exists and is still syncing: sync-data's row may simply not exist yet
+        self.assertEqual(tl.unknown_scopes(state, ["sync-identity", "later-scope"], armed=1), [])
+        self.assertEqual(tl.unknown_scopes(state, ["identity-data"], armed=1), ["identity-data"])
+        done = {"scopes": {"sync-identity": {"state": "synced", "startedAt": 5, "syncedAt": 9, "entries": {}}}, "queue": 0, "counts": {}}
+        self.assertEqual(tl.unknown_scopes(done, ["sync-identity", "sync-data"], armed=1), ["sync-data"])
+        self.assertEqual(tl.unknown_scopes({"scopes": {}, "queue": 0, "counts": {}}, ["x"]), [])  # nothing synced yet
+        out = io.StringIO()
+        t = threading.Thread(target=self.drive)
+        t.start()
+        summary = tl.track(self.db, "pre-1", self.dir, scopes=["base-data"], interval=0.05, settle=0.2, timeout=1.5, stream=out,
+                           unknown_wait=0.2)
+        t.join()
+        self.assertEqual(summary["result"], "timeout")
+        self.assertIn("No scope base-data in this solution", out.getvalue())
+        self.assertIn("Scopes here: sync-base", out.getvalue())
+        self.assertIn("sign out of the app and sign in again", out.getvalue())
+
     def test_failed_entry_stops_the_run(self):
         conn = sqlite3.connect(self.db)
         conn.execute("UPDATE _syncScope SET state='syncing', details=?, lastStartedAt=?",
@@ -207,7 +248,7 @@ class CheckPlansTest(unittest.TestCase):
 class ReviewReportTest(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp()
-        for side in ("before", "after", "runs"):
+        for side in ("before", "after", "runs", "screens"):
             os.makedirs(os.path.join(self.dir, side))
 
     def tearDown(self):
@@ -239,16 +280,49 @@ class ReviewReportTest(unittest.TestCase):
         self.assertIn("| entry: sync-base/a | 5 s | 2 s | -60.0% |", text)
         self.assertIn("Screen open times were not compared", text)
 
+    def test_where_to_look_says_which_side_a_note_is_from(self):
+        # Time-Tracking-V2: "synced more than once" stayed next to after values where it was fixed
+        run = lambda label, repeated: {"label": label, "first_start_to_ready_s": 5.0, "sync_busy_s": 9.0, "result": "ready",
+                                       "repeated_scopes": repeated, "entries": {}, "scopes": {}}
+        for i in range(3):
+            self.write(f"runs/pre-{i}-summary.json", run(f"pre-{i}", ["sync-data"]))
+            self.write(f"runs/post-{i}-summary.json", run(f"post-{i}", []))
+        self.write("before/static.json", {"byPriority": {"high": 5, "medium": 33, "low": 9}, "expressionSafety": {"medium": 24, "low": 0}})
+        self.write("after/static.json", {"byPriority": {"high": 0, "medium": 26, "low": 9}, "expressionSafety": {"medium": 24, "low": 0}})
+        text = rr.report(self.dir, "demo")
+        self.assertIn("before: synced more than once: sync-data; after: none", text)
+        self.assertIn("| Audit findings | 5 high · 33 medium (+24 expression safety) | 0 high · 26 medium (+24 expression safety) |", text)
+        self.assertIn("Priority before: 5 high, 33 medium, 9 low, plus 24 expression-safety", text)
+
+    def test_report_md_keeps_the_verdicts_of_steps_and_screens(self):
+        # The reviewer found report.md printing bare percentages for "not comparable" and "within noise" rows
+        e = lambda name, d: {name: {"start_s": 0.0, "end_s": d, "duration_s": d}}
+        pre = [{"label": f"pre-{i}", "machine": "m", "result": "ready", "first_start_to_ready_s": 5.5, "interval_s": 0.25,
+                "scopes": {}, "repeated_scopes": ["sync-lookups"], "snapshot_timeouts": {}, "log_errors": 0,
+                "entries": {**e("sync-lookups/earningtypes", 2.34 + i / 100), **e("sync-tc/timecard", 0.27)}} for i in range(3)]
+        post = [{**r, "label": f"post-{i}", "first_start_to_ready_s": 1.7, "repeated_scopes": [],
+                 "entries": {**e("sync-lookups/earningtypes", 0.26 + i / 100), **e("sync-tc/timecard", 0.78)}} for i, r in enumerate(pre)]
+        self.write("runs/comparison.json", cr.compare(pre, post))
+        self.write("screens/pre.json", {"device": "sim", "runs": 3, "screens": {"timecards": {"median_ms": 1660, "spread_ms": 1890, "runs": []}}})
+        self.write("screens/post.json", {"device": "sim", "runs": 3, "screens": {"timecards": {"median_ms": 3490, "runs": []}},
+                                         "comparison": {"rows": [{"screen": "timecards", "before_ms": 1660, "after_ms": 3490, "change_pct": 110.2,
+                                                                  "verdict": "unclear (runs overlap)", "before_runs": [3530, 1660, 1640],
+                                                                  "after_runs": [3620, 3490, 1550], "ready": "Week"}]}})
+        text = rr.report(self.dir, "demo")
+        self.assertIn("| entry: sync-lookups/earningtypes | 2.35 s | 0.27 s | -88.5% | not comparable (sync-lookups synced twice in the before runs) |", text)
+        self.assertNotIn("| entry: sync-tc/timecard |", text)  # within noise: left out of report.md
+        self.assertIn("| Screen: timecards | 1.66 s | 3.49 s | unclear (runs overlap): runs 3.53, 1.66, 1.64 → 3.62, 3.49, 1.55 |", text)
+
     def test_query_and_screen_timings(self):
         self.write("before/static.json", {"byCode": {}})
-        os.makedirs(os.path.join(self.dir, "screens"))
+        os.makedirs(os.path.join(self.dir, "screens"), exist_ok=True)
         self.write("before/timings.json", {"meta": {"host": "M2", "rows": 900},
                                            "queries": [{"where": "datasources/a", "ms": 40, "rows": 12}], "actions": [], "indexes": []})
         self.write("screens/pre.json", {"device": "sim", "runs": 3, "screens": {"list": {"median_ms": 2100, "spread_ms": 90}}})
         baseline = rr.report(self.dir)
         self.assertIn("- Queries: 1, 40 ms in total", baseline)
         self.assertIn("| query | `datasources/a` | 40 ms | 12 |", baseline)
-        self.assertIn("| list | 2.10 s | 90 ms |", baseline)
+        self.assertIn("| list | `-` | 2.10 s | - |", baseline)
         self.write("after/timings.json", {"queries": [{"where": "datasources/a", "ms": 8}], "actions": [], "indexes": [],
                                           "comparison": [{"kind": "queries", "where": "datasources/a", "before_ms": 40, "after_ms": 8, "change_pct": -80, "verdict": "faster"}]})
         self.write("screens/post.json", {"device": "sim", "runs": 3, "screens": {}, "comparison": {"rows": [
@@ -256,7 +330,7 @@ class ReviewReportTest(unittest.TestCase):
         text = rr.report(self.dir)
         self.assertIn("- Queries: 1, 40 ms in total → 8 ms", text)
         self.assertIn("| query | `datasources/a` | 40 ms | 8 ms | -80% |", text)
-        self.assertIn("| list | 2.10 s | 1.50 s | -28.6% | faster |", text)
+        self.assertIn("| list | `-` | 2.10 s | 1.50 s | -28.6% | faster |", text)
 
 
 
@@ -389,12 +463,56 @@ class CompareVerdictTest(unittest.TestCase):
         self.assertEqual(rows["entry: s/a"]["verdict"], "parallel now")
         after = [self.summary(f"post-{i}", 3.0, 3.0, jitter) for i in range(3)]
         rows = {r["metric"]: r for r in cr.compare(before, after)["rows"]}
-        self.assertEqual(rows["entry: s/a"]["verdict"], "same")  # 0.26 -> 0.78 s: two sample ticks
+        self.assertEqual(rows["entry: s/a"]["verdict"], "within noise")  # 0.26 -> 0.78 s: +200%, but two sample ticks
 
     def test_first_sync_includes_the_resume(self):
         self.assertEqual(tl.first_sync_s([[1000, 2000, False], [12000, 13000, True], [20000, 21000, False]],
                                          [[2000, 12000]]), 2.0)
         self.assertIsNone(tl.first_sync_s([[1000, None, False]]))
+
+class PeterRunsTest(unittest.TestCase):
+    """The verdicts two review runs reported as wrong (Time-Tracking-V2, Project Central)."""
+
+    def summary(self, label, entries, repeated=(), total=10.0):
+        return {"label": label, "machine": "m", "result": "ready", "first_start_to_ready_s": total, "interval_s": 0.25,
+                "scopes": {}, "entries": entries, "repeated_scopes": list(repeated), "snapshot_timeouts": {}, "log_errors": 0}
+
+    def test_a_call_that_varies_is_unclear_not_a_regression(self):
+        # rest-get-whoami: 3.3-4.4 s before, 1.8-5.6 s after; nothing changed it
+        e = lambda d: {"sync-identity/whoami": {"start_s": 0.0, "end_s": d, "duration_s": d}}
+        before = [self.summary(f"pre-{i}", e(d)) for i, d in enumerate((3.3, 3.6, 4.4))]
+        after = [self.summary(f"post-{i}", e(d)) for i, d in enumerate((1.8, 5.64, 5.6))]
+        row = {r["metric"]: r for r in cr.compare(before, after)["rows"]}["entry: sync-identity/whoami"]
+        self.assertEqual(row["verdict"], "unclear (runs overlap)")
+        self.assertEqual(row["after_runs"], [1.8, 5.64, 5.6])
+        self.assertIn("3.3, 3.6, 4.4 → 1.8, 5.64, 5.6", cr.markdown(cr.compare(before, after)))
+
+    def test_an_entry_of_a_scope_that_synced_twice_is_not_comparable(self):
+        # rest-get-jxttearningtypes 2.34 -> 0.26 s: slow before only because the second sync restarted it
+        e = lambda d: {"sync-lookups/earningtypes": {"start_s": 0.0, "end_s": d, "duration_s": d}}
+        before = [self.summary(f"pre-{i}", e(2.34 + i / 100), repeated=["sync-lookups"]) for i in range(3)]
+        after = [self.summary(f"post-{i}", e(0.26 + i / 100)) for i in range(3)]
+        row = {r["metric"]: r for r in cr.compare(before, after)["rows"]}["entry: sync-lookups/earningtypes"]
+        self.assertEqual(row["verdict"], "not comparable (sync-lookups synced twice in the before runs)")
+
+    def test_a_scope_slower_beside_more_calls_is_parallel_now(self):
+        # sync-lookups +15%: its calls now share the network with the project calls that used to wait
+        serial = {"sync-lookups/a": {"start_s": 0.0, "end_s": 2.0, "duration_s": 2.0},
+                  "sync-data/p": {"start_s": 2.1, "end_s": 4.0, "duration_s": 1.9}}
+        parallel = {"sync-lookups/a": {"start_s": 0.0, "end_s": 2.6, "duration_s": 2.6},
+                    "sync-data/p": {"start_s": 0.0, "end_s": 2.0, "duration_s": 2.0}}
+        mk = lambda label, entries, d: {**self.summary(label, entries), "scopes": {"sync-lookups": {"first_duration_s": d}}}
+        before = [mk(f"pre-{i}", serial, 4.0 + i / 10) for i in range(3)]
+        after = [mk(f"post-{i}", parallel, 4.6 + i / 10) for i in range(3)]
+        rows = {r["metric"]: r for r in cr.compare(before, after)["rows"]}
+        self.assertEqual(rows["scope: sync-lookups"]["verdict"], "parallel now")
+
+    def test_runs_apart_still_count(self):
+        e = lambda d: {"s/a": {"start_s": 0.0, "end_s": d, "duration_s": d}}
+        before = [self.summary(f"pre-{i}", e(d)) for i, d in enumerate((3.0, 3.1, 3.2))]
+        after = [self.summary(f"post-{i}", e(d)) for i, d in enumerate((1.0, 1.1, 1.2))]
+        self.assertEqual({r["metric"]: r for r in cr.compare(before, after)["rows"]}["entry: s/a"]["verdict"], "improved")
+
 
 class LabelTest(unittest.TestCase):
     def test_re_runs_with_any_suffix_count_but_not_android(self):

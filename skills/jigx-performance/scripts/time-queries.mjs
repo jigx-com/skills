@@ -15,8 +15,14 @@
 // a per-copy suffix, so each copy joins to its own rows instead of multiplying the joins;
 // values the solution's SQL compares with literally ('In Process', 1) are kept.
 //
-// params.json binds query parameters by name ({"appointmentId": "AP001"}); unbound
-// parameters are NULL, which makes most filtered queries return nothing quickly.
+// params.json binds query parameters by name ({"appointmentId": "AP001"}). A parameter it does
+// not give is sampled from the column the query compares it with; failing that, it is guessed
+// from a column with the same name (projectId -> ProjectID), taking the value with the most rows
+// (the busiest project), and the report lists every guess. The rest are NULL, which makes most
+// filtered queries return nothing quickly; those are reported as not measured.
+//
+// The database must hold the synced data: copy it with `track-load.py --copy-db`, or pass the
+// live simulator database (it is opened read-only). A plain cp leaves the rows in the -wal file.
 // Read references/run-and-track.md.
 import fs from 'node:fs';
 import os from 'node:os';
@@ -244,8 +250,71 @@ function time(fn, runs) {
   return {ms: round(median(times)), max: round(Math.max(...times)), result};
 }
 
+// Normalised parameter or column name, and its base without a key suffix or a selection prefix:
+// projectId, ProjectID, selectedProject and project_cd all have the base "project".
+const norm = n => String(n).toLowerCase().replace(/[^a-z0-9]/g, '');
+const base = n => norm(n).replace(/^(?:selected|current|active|the)(?=.)/, '').replace(/(?:id|nbr|number|cd|code|key|no)$/, '') || norm(n);
+
+// Columns and JSON data keys of every solution table, for guessing parameter values by name.
+export function dataKeys(db) {
+  const out = [];
+  const tables = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '\\_%' ESCAPE '\\'").all().map(r => r.name);
+  for (const t of tables) {
+    const q = `"${t.replace(/"/g, '""')}"`;
+    try {
+      const cols = db.prepare(`SELECT name FROM pragma_table_info('${t.replace(/'/g, "''")}')`).all().map(r => r.name);
+      for (const c of cols) if (c !== 'data') out.push({table: t, expr: `"${c.replace(/"/g, '""')}"`, key: c});
+      if (cols.includes('data')) {
+        for (const {key} of db.prepare(`SELECT DISTINCT j.key AS key FROM (SELECT data FROM ${q} LIMIT 20) r, json_each(r.data) j`).all())
+          out.push({table: t, expr: `json_extract(data, '$.${String(key).replace(/'/g, "''")}')`, key});
+      }
+    } catch { /* not JSON, or not readable */ }
+  }
+  return out;
+}
+
+// No data: no rows, or one row of zeros and NULLs (count(*) or sum() over nothing, as a per-record
+// photo count with its record NULL returns).
+export const noData = rows => !rows.length || (rows.length === 1 && Object.values(rows[0]).every(v => v == null || v === 0 || v === ''));
+
+// The tables a query reads (FROM and JOIN), without brackets.
+export function queryTables(sql) {
+  return [...new Set([...maskSql(sql).matchAll(/\b(?:FROM|JOIN)\s+(\[[^\]]+\]|[A-Za-z_][\w/-]*)(?!\s*\()/gi)]
+    .map(m => m[1].replace(/^\[|\]$/g, '')))];
+}
+
+// A value for a parameter nothing sampled: the most frequent value of a same-named column or data
+// key (the record with the most rows, e.g. the busiest project), with where it came from. Keys in
+// the tables the query reads come first; other tables only when none of those has the name.
+export function guessParam(db, name, keys = dataKeys(db), tables = []) {
+  const match = ks => {
+    const exact = ks.filter(k => norm(k.key) === norm(name));
+    return exact.length ? exact : ks.filter(k => base(k.key) === base(name) && base(name).length >= 3);
+  };
+  const own = match(keys.filter(k => tables.includes(k.table)));
+  const near = own.length ? own : match(keys);
+  let best = null;
+  for (const k of near) {
+    try {
+      const r = db.prepare(`SELECT ${k.expr} AS v, count(*) AS n FROM "${k.table.replace(/"/g, '""')}" WHERE ${k.expr} IS NOT NULL AND ${k.expr} <> '' GROUP BY v ORDER BY n DESC LIMIT 1`).get();
+      if (r && (!best || r.n > best.rows)) best = {value: r.v, from: `${k.table}.${k.key}`, rows: r.n};
+    } catch { /* column not comparable */ }
+  }
+  return best;
+}
+
 export function timeSolution(app, db, {params = {}, runs = 5, sources = {}} = {}) {
   const {queries, indexes, steps, built} = collect(app);
+  let keys = null;
+  const guessed = new Map();
+  const used = new Set();
+  const guessKey = (name, sql) => `${name}|${queryTables(sql).sort().join(',')}`;
+  const guess = (name, sql) => {
+    const key = guessKey(name, sql);
+    if (!guessed.has(key)) guessed.set(key, {name, ...(guessParam(db, name, keys ??= dataKeys(db), queryTables(sql)) ?? {none: true})});
+    const g = guessed.get(key);
+    return g.none ? null : g;
+  };
   // Given values first, then a real value sampled from the data, else NULL.
   const sampled = new Map();
   const sample = sql => {
@@ -259,8 +328,12 @@ export function timeSolution(app, db, {params = {}, runs = 5, sources = {}} = {}
     }
     return sampled.get(sql);
   };
-  const bind = sql => { const s = sample(sql); return Object.fromEntries(paramNames(sql).map(n => [n, params[n] ?? s[n] ?? null])); };
-  const unbound = sql => paramNames(sql).filter(n => !(n in params) && !(n in sample(sql)));
+  // Unbound parameters are NULL first: an optional filter (@p IS NULL OR ...) then shows every row,
+  // as the screen does. Only a query that returns nothing with NULL is tried with guessed values.
+  const bind = (sql, guessing = false) => { const s = sample(sql); return Object.fromEntries(paramNames(sql).map(n =>
+    [n, params[n] ?? s[n] ?? (guessing ? guess(n, sql)?.value : null) ?? null])); };
+  const open = sql => paramNames(sql).filter(n => !(n in params) && !(n in sample(sql)));
+  const unbound = sql => open(sql);
   const loc = p => where(p, sources);
   const existing = new Set(db.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all().map(r => r.name));
 
@@ -273,14 +346,25 @@ export function timeSolution(app, db, {params = {}, runs = 5, sources = {}} = {}
   });
 
   const queryResults = queries.map(q => {
-    const base = {where: loc(q.path), copies: q.copies, sampled: Object.keys(sample(q.sql)).filter(n => !(n in params)), unbound: unbound(q.sql)};
+    const base = {where: loc(q.path), copies: q.copies, sampled: Object.keys(sample(q.sql)).filter(n => !(n in params)),
+      unbound: unbound(q.sql)};
     try {
       const stmt = db.prepare(q.sql);
-      const args = bind(q.sql);
-      const {ms, max, result} = time(() => stmt.all(args), runs);
+      let timed = time(() => stmt.all(bind(q.sql)), runs);
+      const guessable = base.unbound.filter(n => guess(n, q.sql));
+      if (noData(timed.result) && guessable.length) {
+        const tried = time(() => stmt.all(bind(q.sql, true)), runs);
+        if (!noData(tried.result)) {
+          timed = tried;
+          base.guessed = guessable;
+          for (const n of guessable) used.add(guessKey(n, q.sql));
+          base.unbound = base.unbound.filter(n => !guessable.includes(n));
+        }
+      }
+      const {ms, max, result} = timed;
       // A parameter the screen fills (a barcode, a search box) is NULL here; with no rows the
       // query timed nothing, so its time is not a measurement: pass the value with --params.
-      return {...base, ms, max, rows: result.length, ...(base.unbound.length && !result.length ? {nullParams: true} : {})};
+      return {...base, ms, max, rows: result.length, ...(base.unbound.length && noData(result) ? {nullParams: true} : {})};
     } catch (e) { return {...base, error: e.message}; }
   }).sort((a, b) => (b.ms ?? -1) - (a.ms ?? -1));
 
@@ -296,7 +380,14 @@ export function timeSolution(app, db, {params = {}, runs = 5, sources = {}} = {}
     } catch (e) { return {...base, error: e.message}; }
   }).sort((a, b) => (b.ms ?? -1) - (a.ms ?? -1));
 
-  return {indexes: indexResults, queries: queryResults, actions: stepResults, notTimed: [...new Set(built)].map(loc)};
+  // One line per parameter and value, for the guesses a query was timed with.
+  const guesses = {};
+  for (const [key, g] of guessed) {
+    if (g.none || !used.has(key)) continue;
+    const k = `${g.name}=${JSON.stringify(g.value)}`;
+    guesses[k] ??= {name: g.name, value: g.value, from: g.from, rows: g.rows};
+  }
+  return {indexes: indexResults, queries: queryResults, actions: stepResults, notTimed: [...new Set(built)].map(loc), guesses};
 }
 
 // Change per item against an earlier run, matched by kind and location.
@@ -340,11 +431,20 @@ export function timingsReport({title, result, comparison, comparisonScaled, meta
     `${result.indexes.filter(i => i.ms != null).length} built on the copy (${total(result.indexes)} ms), ` +
     `${result.indexes.filter(i => i.note === 'already on the device').length} already on the device` +
     `${result.indexes.some(i => i.error) ? `, ${result.indexes.filter(i => i.error).length} failed` : ''}.**`, '');
+  const guesses = Object.values(result.guesses ?? {}).sort((a, b) => b.rows - a.rows);
+  if (guesses.length) lines.push(`## Guessed parameters (${guesses.length})`, '',
+    'For queries that return nothing with the parameter NULL: bound from a column with the same name in the tables the ' +
+    'query reads (else another table), taking the value with the most rows (the busiest record). Check the ones the key ' +
+    'screens use; pin others with --params params.json ({"name": "value"}).', '',
+    ...guesses.slice(0, 25).map(g => `- @${g.name} = ${JSON.stringify(g.value)} (from ${g.from}, ${g.rows} rows)`),
+    ...(guesses.length > 25 ? [`- … ${guesses.length - 25} more in the JSON output (\`guesses\`)`] : []), '');
   const nulls = result.queries.filter(q => q.nullParams);
-  if (nulls.length) lines.push(`## Timed on NULL parameters: not measured (${nulls.length})`, '',
+  if (nulls.length) lines.push(`## No rows on NULL or guessed parameters: not measured (${nulls.length})`, '',
     'These queries compare a value the screen supplies (a barcode, a search box, a selected record) and returned no rows ' +
-    'with it NULL, so their time says nothing. Pass real values with --params params.json ({"name": "value"}) and time them again.', '',
-    ...nulls.slice(0, 20).map(q => `- \`${q.where}\`: ${q.unbound.map(n => '@' + n).join(', ')}`), '');
+    'with it NULL (and with a guessed value, where one was found), so their time says nothing. Pass real values with --params params.json ({"name": "value"}) ' +
+    'and time them again.', '',
+    ...nulls.slice(0, 20).map(q => `- \`${q.where}\`: ${q.unbound.map(n => '@' + n).join(', ')}`),
+    ...(nulls.length > 20 ? [`- … ${nulls.length - 20} more`] : []), '');
   for (const [heading, rows] of [['Before and after', comparison], [`Before and after at ${scale}x data`, comparisonScaled]]) {
     if (!rows?.length) continue;
     const moved = rows.filter(r => r.verdict !== 'same');
@@ -375,6 +475,7 @@ export function timingsReport({title, result, comparison, comparisonScaled, meta
     lines.push('');
   };
   const note = r => r.error ? `error: ${r.error}` : [r.sampled?.length && `sampled: ${r.sampled.join(', ')}`,
+    r.guessed?.length && `guessed: ${r.guessed.join(', ')}`,
     r.unbound?.length && `NULL: ${r.unbound.join(', ')}`, r.note].filter(Boolean).join('; ');
   table('Slowest queries', result.queries.filter(q => q.ms != null).slice(0, 25), [
     ['Where', r => `\`${r.where}\`${r.copies > 1 ? ` (${r.copies} copies)` : ''}`], ['Median', r => `${r.ms} ms`, 1], ['Max', r => `${r.max} ms`, 1], ['Rows', r => r.rows, 1], ['Note', note]]);
@@ -393,7 +494,7 @@ export function timingsReport({title, result, comparison, comparisonScaled, meta
     ...result.notTimed.slice(0, 20).map(w => `- \`${w}\``), '');
   lines.push('## Not measured here', '',
     '- Sync and network time: `track-load.py`. Screen open time, which includes expression evaluation and rendering: `time-screens.py`.',
-    '- Parameters: given in --params, else "sampled" (one real value of the column the query compares them to), else NULL. A NULL parameter usually returns no rows, so that query\'s time is a lower bound.');
+    '- Parameters: given in --params, else "sampled" (one real value of the column the query compares them to), else "guessed" (the most frequent value of a same-named column), else NULL. A NULL parameter usually returns no rows, so that query\'s time is a lower bound.');
   return lines.join('\n') + '\n';
 }
 
@@ -412,13 +513,22 @@ async function main() {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'jigx-time-'));
     const copy = path.join(dir, 'copy.db');
     try {
-      const src = new DatabaseSync(dbPath, {readOnly: true});
-      src.exec(`VACUUM INTO '${copy.replace(/'/g, "''")}'`);
-      src.close();
+      try {
+        const src = new DatabaseSync(dbPath, {readOnly: true});
+        src.exec(`VACUUM INTO '${copy.replace(/'/g, "''")}'`);
+        src.close();
+      } catch (e) {
+        throw new Error(`cannot read ${dbPath} (${e.message}). Copy it with: python3 track-load.py --solution <name> --copy-db <file>`);
+      }
       // The device's SQLite accepts "text" as a string literal; match it.
       const db = new DatabaseSync(copy, {enableDoubleQuotedStringLiterals: true});
       const tables = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().map(r => r.name);
       const rows = tables.reduce((n, t) => n + db.prepare(`SELECT count(*) AS n FROM "${t.replace(/"/g, '""')}"`).get().n, 0);
+      // The runtime's own tables (_syncScope, __migrations) exist before any data does: count data tables only.
+      const dataRows = tables.filter(t => !t.startsWith('_') && !t.startsWith('sqlite_'))
+        .reduce((n, t) => n + db.prepare(`SELECT count(*) AS n FROM "${t.replace(/"/g, '""')}"`).get().n, 0);
+      if (!dataRows) throw new Error(`${dbPath} has no data rows (${tables.length} tables), so nothing can be timed. A copy made with cp ` +
+        'leaves the rows in the -wal file: copy it with python3 track-load.py --solution <name> --copy-db <file>, or sign in and let the sync finish.');
       const params = paramsPath ? JSON.parse(fs.readFileSync(paramsPath, 'utf8')) : {};
       const result = timeSolution(loaded.app, db, {params, runs, sources: loaded.sources});
       const meta = {host: `${os.type()} ${os.arch()}, ${os.cpus()[0]?.model ?? 'unknown CPU'}`, sqlite: db.prepare('SELECT sqlite_version() AS v').get().v,

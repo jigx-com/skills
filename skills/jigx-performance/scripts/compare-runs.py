@@ -6,12 +6,21 @@ Standard library only. Reads <folder>/*-summary.json, groups runs by label prefi
 to ready, the total sync work (also after ready) and the number of scope starts, each
 scope, and each sync entry, with the change in percent. A slowdown
 over --threshold percent (default 10) is flagged for investigation; it is a review
-threshold, not an SLA. A change smaller than --min-change seconds (default 0.5) is reported as "same";
-for an entry the floor is three sampling intervals (0.75 s at track-load.py's 0.25 s,
-1.5 s on Android), since its start and end are each only as precise as one sample. A
-scope is compared by its first sync (a repeat sync before a fix moves its last start). An
-entry that is slower only because it now runs side by side with others is labelled
-"parallel now", not REGRESSION: the total shows whether running in parallel paid off.
+threshold, not an SLA. Verdicts, checked against the runs and not only the medians:
+
+  same            under the threshold
+  within noise    over the threshold in percent, but under --min-change seconds (default
+                  0.5; for an entry three sampling intervals, 0.75 s at track-load.py's
+                  0.25 s, since its start and end are each only as precise as one sample)
+  unclear         the medians moved, but the runs overlap: some before run is faster than
+                  some after run (a call whose time varies, or runs in two groups)
+  parallel now    slower only because it now runs side by side with other calls; the total
+                  shows whether running in parallel paid off
+  not comparable  an entry of a scope that synced twice in a run on one side: the repeat
+                  restarted it, so its time measures the repeat, not the call
+  improved / REGRESSION   every run on one side beats every run on the other
+
+A scope is compared by its first sync (a repeat sync before a fix moves its last start).
 
 Writes <folder>/comparison.md and comparison.json, and prints the markdown. Android runs
 (--before pre-android --after post-android) write comparison-android.md and .json.
@@ -56,6 +65,14 @@ def change(before, after, threshold, min_change=0.5):
     return pct, "REGRESSION" if pct > threshold else "improved" if pct < -threshold else "same"
 
 
+def overlap(before, after):
+    """True when the runs on the two sides overlap (2+ runs a side): no run-by-run change."""
+    b, a = [v for v in before if v is not None], [v for v in after if v is not None]
+    if min(len(b), len(a)) < 2:
+        return False
+    return not (max(a) < min(b) or min(a) > max(b))
+
+
 def metrics(runs):
     """{metric: [value per run]} for total, each scope and each entry."""
     out = {"total: first start to ready": [r.get("first_start_to_ready_s") for r in runs],
@@ -79,9 +96,17 @@ def overlapped(run, name):
                for n, o in run["entries"].items() if n != name)
 
 
-def share_parallel(before, after, name):
-    """Most after runs ran the entry in parallel, most before runs did not."""
-    frac = lambda runs: sum(overlapped(r, name) for r in runs) / len(runs) if runs else 0
+def scope_overlapped(run, scope):
+    """True when an entry of this scope ran side by side with an entry of another scope."""
+    entries = run.get("entries", {})
+    mine = [e for n, e in entries.items() if n.split("/")[0] == scope and e.get("end_s") is not None]
+    other = [e for n, e in entries.items() if n.split("/")[0] != scope and e.get("end_s") is not None]
+    return any(o["start_s"] < e["end_s"] and o["end_s"] > e["start_s"] for e in mine for o in other)
+
+
+def share_parallel(before, after, name, test=overlapped):
+    """Most after runs ran it in parallel, most before runs did not."""
+    frac = lambda runs: sum(test(r, name) for r in runs) / len(runs) if runs else 0
     return frac(after) > 0.5 >= frac(before)
 
 
@@ -90,14 +115,29 @@ def compare(before, after, threshold=10.0, min_change=0.5):
     # Entry times come from samples: start and end are each off by up to one interval, so
     # an entry change under three intervals is sampling noise.
     interval = max([r.get("interval_s") or 0.25 for r in before + after] or [0.25])
+    repeated = {side: {sid for r in runs for sid in r.get("repeated_scopes", [])}
+                for side, runs in (("before", before), ("after", after))}
     rows = []
     for name in list(dict.fromkeys(list(b) + list(a))):
-        mb, ma = median(b.get(name, [])), median(a.get(name, []))
-        entry = name.startswith("entry: ")
-        pct, verdict = change(mb, ma, threshold, max(min_change, 3 * interval) if entry else min_change)
-        if entry and verdict == "REGRESSION" and share_parallel(before, after, name[len("entry: "):]):
+        bs, as_ = b.get(name, []), a.get(name, [])
+        mb, ma = median(bs), median(as_)
+        kind, _, item = name.partition(": ")
+        floor = max(min_change, 3 * interval) if kind == "entry" else min_change
+        pct, verdict = change(mb, ma, threshold, floor)
+        if verdict == "same" and pct is not None and abs(pct) > threshold:
+            verdict = "within noise"  # a large percentage of a time under the noise floor
+        if verdict in ("REGRESSION", "improved") and kind == "entry":
+            scope = item.split("/")[0]
+            twice = [side for side in ("before", "after") if scope in repeated[side]]
+            if twice:
+                verdict = f"not comparable ({scope} synced twice in the {' and '.join(twice)} runs)"
+        if verdict == "REGRESSION" and kind in ("entry", "scope") and share_parallel(
+                before, after, item, overlapped if kind == "entry" else scope_overlapped):
             verdict = "parallel now"  # it shares the network with other calls now; the total says if that paid off
-        rows.append({"metric": name, "before_s": mb, "after_s": ma, "change_pct": pct, "verdict": verdict})
+        if verdict in ("REGRESSION", "improved") and overlap(bs, as_):
+            verdict = "unclear (runs overlap)"
+        rows.append({"metric": name, "before_s": mb, "after_s": ma, "change_pct": pct, "verdict": verdict,
+                     "before_runs": [v for v in bs if v is not None], "after_runs": [v for v in as_ if v is not None]})
     warnings = []
     for side, runs in (("before", before), ("after", after)):
         if len(runs) < 3:
@@ -136,10 +176,17 @@ def markdown(report):
              f"{report.get('min_change_s', 0.5)} s are flagged.", ""]
     if report["warnings"]:
         lines += ["**Warnings**", ""] + [f"- {w}" for w in report["warnings"]] + [""]
-    lines += ["| Metric | Before | After | Change | Verdict |", "| --- | ---: | ---: | ---: | --- |"]
+    runs = lambda vs: ", ".join(f"{v:g}" for v in vs) or "-"
+    lines += ["| Metric | Before | After | Change | Verdict | Runs before → after |", "| --- | ---: | ---: | ---: | --- | --- |"]
     for r in report["rows"]:
         lines.append(f"| {r['metric']} | {fmt(r['before_s'])} | {fmt(r['after_s'])} | "
-                     f"{fmt(r['change_pct'], '%')} | {r['verdict']} |")
+                     f"{fmt(r['change_pct'], '%')} | {r['verdict']} | {runs(r.get('before_runs', []))} → {runs(r.get('after_runs', []))} |")
+    lines += ["", "**improved** / **REGRESSION**: every run on one side beats every run on the other. "
+              "**unclear**: the medians moved but the runs overlap, so there is no change run by run. "
+              "**within noise**: a large percentage of a time under the noise floor "
+              f"({report.get('min_change_s', 0.5)} s; three sampling intervals for an entry). "
+              "**parallel now**: slower because it now runs beside other calls; read the total. "
+              "**not comparable**: its scope synced twice in a run, so the repeat restarted it."]
     lines += ["", f"Timeout for first snapshot: before {report['snapshot_timeouts']['before']}, "
                   f"after {report['snapshot_timeouts']['after']}. "
                   f"Log errors: before {report['log_errors']['before']}, after {report['log_errors']['after']}. "
@@ -156,7 +203,7 @@ def main(argv=None):
     p.add_argument("--after", default="post")
     p.add_argument("--threshold", type=float, default=10.0, help="percent slowdown to flag")
     p.add_argument("--min-change", type=float, default=0.5,
-                   help="seconds; smaller changes are reported as same (sampling resolution)")
+                   help="seconds; smaller changes are 'same', or 'within noise' when over --threshold percent (sampling resolution)")
     args = p.parse_args(argv)
     before, after = load(args.folder, args.before), load(args.folder, args.after)
     if not before or not after:
