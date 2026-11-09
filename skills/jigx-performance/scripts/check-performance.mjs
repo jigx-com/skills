@@ -929,7 +929,9 @@ export const SECTION_MEANING = {
   H: 'Credentials, logging and errors. Problems here are security risk or failures nobody sees.',
 };
 
-export function markdownReport({title, findings: all, parseErrors = [], stats}) {
+// Low findings are a table of counts by type unless listLow is set: in one review they were
+// 1,880 of 2,285 findings and buried the 45 high ones.
+export function markdownReport({title, findings: all, parseErrors = [], stats, listLow = false}) {
   // Expressions that may throw on an empty value are a safety list of their own: in one review
   // they were 432 of 816 findings and none was logged at runtime, so they get their own block.
   const safety = all.filter(f => f.code === 'expression-may-throw');
@@ -953,6 +955,16 @@ export function markdownReport({title, findings: all, parseErrors = [], stats}) 
     const items = findings.filter(f => f.priority === p);
     if (!items.length) continue;
     lines.push(`## ${p[0].toUpperCase()}${p.slice(1)} priority`, '');
+    if (p === 'low' && !listLow) {
+      const codes = [...new Set(items.map(f => f.code))].sort((a, b) =>
+        items.filter(f => f.code === b).length - items.filter(f => f.code === a).length);
+      lines.push('Optional; worth fixing only on tables that are large or growing. Counts by type; ' +
+        '`--list-low` lists each one, and `--db` raises the ones on big tables to medium or high.', '',
+        '| Type | Count | § | Fix |', '| --- | ---: | --- | --- |',
+        ...codes.map(c => { const g = items.filter(f => f.code === c);
+          return `| ${c} | ${g.length} | ${g[0].section} | ${g[0].fix.replace(/\|/g, '\\|')} |`; }), '');
+      continue;
+    }
     for (const code of [...new Set(items.map(f => f.code))]) {
       const group = items.filter(f => f.code === code);
       lines.push(`### ${code} (${group.length}) · ${group[0].section} ${SECTIONS[group[0].section]}`, '',
@@ -971,11 +983,13 @@ export function markdownReport({title, findings: all, parseErrors = [], stats}) 
       'empty, so check them against the runtime log (track-load.py lists every expression error) and guard the ones ' +
       'whose value can really be empty: a typed or picked value, a column that is not set on every row. Keys are low.', '',
       `**Fix:** ${safety[0].fix}`, '');
-    const files = [...new Set(safety.map(f => f.where.split(' › ')[0]))];
+    const shown = listLow ? safety : safety.filter(f => f.priority !== 'low');
+    const files = [...new Set(shown.map(f => f.where.split(' › ')[0]))];
     for (const file of files) {
-      const here = safety.filter(f => f.where.startsWith(file));
+      const here = shown.filter(f => f.where.startsWith(file));
       lines.push(`- \`${file}\` (${here.length}): ${[...new Set(here.map(f => f.message))].slice(0, 3).join('; ')}${here.length > 3 ? '; …' : ''}`);
     }
+    if (!listLow && by('low')) lines.push(`- ${by('low')} low (keys and other columns) not listed; \`--list-low\` lists them.`);
     lines.push('');
   }
   if (stats) {
@@ -1002,6 +1016,7 @@ async function main() {
     const args = process.argv.slice(2);
     const opt = name => { const i = args.indexOf(name); return i >= 0 ? args.splice(i, 2)[1] : undefined; };
     const dump = args.includes('--dump-app') && args.splice(args.indexOf('--dump-app'), 1);
+    const listLow = args.includes('--list-low') && !!args.splice(args.indexOf('--list-low'), 1);
     const dbPath = opt('--db'), reportPath = opt('--report'), baselinePath = opt('--baseline'), failOn = opt('--fail-on');
     if (failOn && !PRIORITIES.includes(failOn)) throw new Error(`--fail-on takes ${PRIORITIES.join(', ')}`);
     const file = args[0] || 'build/output.json';
@@ -1020,7 +1035,7 @@ async function main() {
       limits: 'Static leads only. Confirm each with row/byte counts and a query plan (scripts/profile-query.py); this does not measure device timing.'}, null, 2));
     if (reportPath) {
       const title = loaded.app.title ?? loaded.app.name ?? path.basename(path.resolve(file));
-      fs.writeFileSync(reportPath, markdownReport({title, findings, parseErrors: loaded.parseErrors, stats}));
+      fs.writeFileSync(reportPath, markdownReport({title, findings, parseErrors: loaded.parseErrors, stats, listLow}));
       console.error(`Report written to ${reportPath}: ${byPriority.high} high, ${byPriority.medium} medium, ${byPriority.low} low.`);
     }
     if (added) console.error(`${added.length} finding(s) not in the baseline.`);

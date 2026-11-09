@@ -135,6 +135,21 @@ test('markdown report groups findings by priority and code with the fix once', (
   assert.doesNotMatch(md, /\| B \| Queries and indexes/);
 });
 
+test('markdown report counts low findings by type unless listLow is set', () => {
+  const low = (code, where) => ({priority: 'low', section: 'B', code, where, message: `m ${where}`, fix: 'Index a | b'});
+  const findings = [low('unindexed-predicate', 'a.jigx'), low('unindexed-predicate', 'b.jigx'), low('order-by-unindexed', 'c.jigx'),
+    {priority: 'low', section: 'D', code: 'expression-may-throw', where: 'k.jigx › $.x', message: 'key', fix: 'Guard'}];
+  const md = markdownReport({title: 'sol', findings});
+  assert.match(md, /\| unindexed-predicate \| 2 \| B \| Index a \\\| b \|/);
+  assert.ok(md.indexOf('| unindexed-predicate |') < md.indexOf('| order-by-unindexed |'));
+  assert.doesNotMatch(md, /a\.jigx|k\.jigx/);
+  assert.match(md, /1 low \(keys and other columns\) not listed/);
+  const full = markdownReport({title: 'sol', findings, listLow: true});
+  assert.match(full, /### unindexed-predicate \(2\)/);
+  assert.match(full, /`a\.jigx`/);
+  assert.match(full, /`k\.jigx`/);
+});
+
 test('loads a YAML solution folder into the output.json shape', {skip: spawnSync('ruby', ['-v']).status !== 0 && 'ruby not installed'}, () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'jigx-sol-'));
   const write = (rel, text) => { fs.mkdirSync(path.dirname(path.join(dir, rel)), {recursive: true}); fs.writeFileSync(path.join(dir, rel), text); };

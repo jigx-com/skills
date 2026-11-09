@@ -109,7 +109,7 @@ finding shows where it is (file, then the path inside it) and what is wrong:
 | --- | --- |
 | High | Before merging. These cost seconds on every load, grow O(n²), or return wrong data. |
 | Medium | Confirm in the source, then fix or note in the PR why it stays. |
-| Low | Only when the table is big. With `--db <device database>` size-dependent findings are raised when the data is large. |
+| Low | Only when the table is big. `audit.md` counts them by type (`--list-low` lists each one); with `--db <device database>` size-dependent findings are raised when the data is large. |
 
 What it checks:
 
@@ -163,7 +163,7 @@ YAML folder or an SDK `build/output.json`.
 
 | Script | Does |
 | --- | --- |
-| `check-performance.mjs` | the audit (`--report`, `--db`, `--baseline`, `--fail-on`) |
+| `check-performance.mjs` | the audit (`--report`, `--list-low`, `--db`, `--baseline`, `--fail-on`) |
 | `pr-check.mjs` | the PR regression check against the target branch (CI: `ci/jigx-performance.yml`) |
 | `check-plans.py` | query plans: full scans, unused indexes, CI guards |
 | `time-queries.mjs` | every query, action and index build timed on a device database copy (`--scale 10`, `--baseline`) |
