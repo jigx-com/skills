@@ -45,8 +45,9 @@ node <skill-directory>/scripts/check-performance.mjs <solution> --report <review
 python3 <skill-directory>/scripts/check-plans.py <solution> > <review>/before/plans.json
 ```
 
-`<solution>` is the YAML folder or the SDK `build/output.json`. Check every high and
-medium finding in the source and drop the false ones before proposing anything.
+`<solution>` is the YAML folder or the SDK `build/output.json`. Check every high finding
+in the source, and two or three of each medium type; drop a type whose samples are
+false, and say why, before proposing anything.
 
 ## 2. Time the current solution
 
