@@ -68,6 +68,28 @@ Capture restart may clear logs: persist useful sanitized evidence first. Correla
 record id, function, time, HTTP status and nested field errors. Never dump credentials,
 request authorization headers or full debugger state into reports.
 
+## Production logs
+
+For a live solution, read at least two weeks of runtime logs before and after a fix.
+Record events, users, devices, errors and warnings per app version. Group errors by
+message with ids removed, rank by events and users, and match each group to a source
+cause:
+
+| Log signature | Usual cause | Read |
+| --- | --- | --- |
+| `UNIQUE constraint failed: <table>.id` | initialisation run twice or concurrently | `sync-orchestration.md` |
+| function received undefined/null, `length of undefined` | missing or left-joined field | `jsonata-validation-formatting.md` |
+| missing required parameter (employee, branch) | action ran before context loaded | `sync-orchestration.md` |
+| `row value misused` | non-scalar SQL parameter | `datasources.md` |
+| repeated 404 on the same entity | endpoint missing but still synced | `sync-orchestration.md` |
+| entity ID missing, falling back to hash | output transform without `id` | `writes-and-duplicates.md` |
+| Authorization header inside an error record | parameters logged with the event | `app-architecture.md` |
+
+A group with a source match is confirmed; a static finding with no log trace is a risk.
+Several app versions active at once means fixes do not reach everyone: report the spread
+and compare error rates per version before blaming the solution. A fix is done when its
+group falls to zero over a few days of use, not when it builds.
+
 Review generated artifacts and actual failure evidence. Read back the published
 configuration. Report static checks, live contract reads, local save/reopen and
 remote submission/readback separately. Queue acceptance is not a successful save.

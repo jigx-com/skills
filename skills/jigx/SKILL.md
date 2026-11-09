@@ -26,6 +26,9 @@ needed for the task.
    `references/runtime-verification.md` before implementation. Run its generated
    checker before publishing and verify the affected target-app journey. Compilation
    alone does not establish working behavior.
+8. For slow screens, lists, queries or start-up, use the `jigx-performance` skill. For
+   start-up or sync work, read `references/sync-orchestration.md`. For any create or update sent to a server, read
+   `references/writes-and-duplicates.md`.
 
 ## Reference Map
 
@@ -42,7 +45,11 @@ needed for the task.
   dropdowns, icons, and field conventions.
 
 - `references/runtime-verification.md` - generated checks, device journeys, debug
-  evidence and verification claims.
+  evidence, production log audit and verification claims.
+- `references/sync-orchestration.md` - context gate, sync tiers, delta and interval
+  refresh, idempotent initialisation, 404 endpoints, hard reset.
+- `references/writes-and-duplicates.md` - stable ids, idempotency keys, queue claims,
+  retry policy by status, double-tap guards, runtime replay, stable read ids.
 
 ## Guardrails
 
@@ -55,3 +62,12 @@ needed for the task.
 - Do not use jig state as a substitute for stable screen inputs when saving parent or
   child records.
 - Do not assume generated YAML matches intent. Inspect it when behavior is unclear.
+- Do not retry a create or update automatically on 5xx or no response unless the
+  endpoint is idempotent by key. Keep `retry:` on 429 only.
+- Do not generate a record id inside a save or submit action, or from `$random()` in an
+  `initialValue`.
+- Do not bind a `jig.list` to a datasource without a unique `id`, or a long data list to
+  `component.list`.
+- Do not set `rewriteQuery: false` on a query that still uses `'$.field'` shorthand.
+- Do not put solution state in a global datasource's `queryParameters`.
+- Do not run a sync without validating the context it filters on.
