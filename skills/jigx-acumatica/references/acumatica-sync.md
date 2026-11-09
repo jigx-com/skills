@@ -253,7 +253,8 @@ Queue drain best practices:
 For operations where a lost success response could create duplicates, run an
 idempotency or "find existing remote record" preflight before retrying the create. If
 the remote record already exists, reconcile local state and mark the command succeeded
-instead of creating a duplicate.
+instead of creating a duplicate. The generic retry policy by status, claim pattern and
+test matrix are in the `jigx` skill, `references/writes-and-duplicates.md`.
 
 ## Error UX And Repair
 

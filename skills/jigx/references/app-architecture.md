@@ -52,6 +52,31 @@ Generated YAML is the runtime truth. Inspect it when:
 - a tab does not see child records
 - an SDK type appears behind current runtime behavior
 
+## Credentials
+
+Keep credentials in solution settings and read them as
+`=@ctx.solution.settings.custom.<Name>`; never write a literal `Basic` header, API key or
+token into a function or action. When one is found in source or logs: rotate it with its
+owner first, create the setting, replace the literal one function at a time, stop
+Authorization headers and request parameters reaching error records, then confirm the old
+value no longer works. Report credentials by file, line and a masked hint only.
+
+## Known SDK Builder Gaps
+
+Found porting production YAML solutions to the SDK; recheck against the installed
+version before working around them:
+
+- REST `url` cannot be an expression (`toNonExpression`); the platform supports it.
+- `continuation.parameters` has no builder path and passes through raw.
+- REST parameters have no `default`.
+- `FunctionErrorBuilder.title()` copies the title into a missing `description`, inventing
+  user-visible text. Check generated error blocks.
+- The expression validator rejects `@ctx.error.name`, which the runtime accepts.
+- The SQL validator creates tables with only `id` and `data` (a `timestamp` reference is
+  refused), rejects double-quoted literals, and mangles hyphenated table names.
+- Datasource builders always emit `instanceId`; no builder models `style`; there is no
+  reusable component collection, so shared UI is a TypeScript function that emits builders.
+
 ## Public Skill Hygiene
 
 Do not include:
