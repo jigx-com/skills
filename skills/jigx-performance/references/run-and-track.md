@@ -24,18 +24,29 @@ not a timeline.
 
 **Screens.** `time-screens.py` runs one Maestro flow per screen: setup steps (untimed),
 then the tap, then a wait for the ready element. Pick a ready element that only
-appears once the data is there (a row number, not the title). Maestro's own overhead is
+appears once the data is there (a row number, not the title), and that renders last in
+the part you are timing: the time covers only what renders before it, so a per-row fix
+shows only when the ready element is what the fix changes (a row's photo count, not its
+number). The timed tap does not wait for the screen to settle: Maestro's settle wait once
+read 8.3 s, steady, for rows visible at 1.9 s, which looked like the 8 s snapshot timeout.
+The settle time is reported on its own ("Settled"). Maestro's own overhead is
 about 2.5–3 s for a static iOS screen on an M2 Pro and varies by ~300 ms; two runs of an
 identical build once differed by 11%. So a screen counts as faster or slower only when
 every run on one side beats every run on the other and the medians differ by 250 ms,
-with at least 2 successful runs a side. Put a static screen in the spec as a control.
-Cold-start screens run after all the others, so no screen meets an app that is still
-starting.
+with at least 2 successful runs a side. When the medians move by 25% or more but the runs
+overlap, the verdict is "unclear": usually two groups of runs (a background sync in some);
+the report shows every run. A static control screen inside the solution shows Maestro's
+overhead; never use the More tab or the solution switcher for it. Cold-start screens run
+after all the others, so no screen meets an app that is still starting.
 
-Navigate by id, not text, and give the spec a top-level `reset` that returns to the start
-screen; it runs before every warm run, and after a failed run the app is restarted too,
-so one failed back step cannot break the rest (one review lost 13 of 21 runs to that).
-Ids that work in Jigx apps (`maestro hierarchy` prints the rest):
+Navigate by id, not text or screen coordinates, and give the spec a top-level `reset` that
+returns to the start screen; it runs before every warm run, and after a failed run the app
+is restarted too, so one failed back step cannot break the rest (one review lost 13 of 21
+runs to that). Every tap waits up to 30 s for its element first, so a tab hidden while an
+`onFocus` sync runs (a `when:` on the tab) no longer fails the run. Top-level `prepare`
+steps run once before the round, for state the screens need (the project to show, which a
+sign-in clears). Ids that work in Jigx apps (`time-screens.py --ids` prints the ids and
+texts on the current screen):
 
 | Element | Id |
 |---|---|
@@ -53,10 +64,14 @@ screen with no rows times nothing.
 **Queries and actions.** `time-queries.mjs` copies the database with `VACUUM INTO`
 (read-only on the original), builds the shipped indexes on the copy, then times every
 query and every `execute-sql` step inside a transaction it rolls back. Each parameter
-compared with `= @p` gets a real value sampled from that column; others are NULL and
-marked. Run it on the database the test user's sync just filled, the same one before
-and after: on a near-empty database every query takes a fraction of a millisecond and
-nothing ranks.
+compared with `= @p` gets a real value sampled from that column; one the query reads
+another way (solution state, `instr`) is guessed from a column with the same name, taking
+the value with the most rows, and listed as a guess; the rest are NULL and marked "not
+measured". Run it on a copy of the database the test user's sync just filled
+(`track-load.py --solution <name> --copy-db <review>/before/device.db`), the same copy
+before and after: on a near-empty database every query takes a fraction of a millisecond
+and nothing ranks. A plain `cp` of the database leaves the rows in its `-wal` file; the
+copy then looks empty, and `time-queries.mjs` stops rather than time nothing.
 
 **Android.** Time Android as well as iOS: rendering, lists and expressions cost
 differently there, and low-end Android phones are the slowest devices most customers
@@ -77,9 +92,9 @@ use.
   sign-in with a cold-start screen instead. Each sample is an adb round trip, so entry times have about
   0.6 s resolution (scope times use the runtime's own timestamps). Android words the
   hash warning "Missing entity id, falling back to hash"; both wordings are counted.
-- Queries: copy the database off the emulator after the sync (`adb exec-out "sqlite3
-  <db> '.backup /data/local/tmp/copy.db'"`, then `adb pull`) and run `time-queries.mjs`
-  on the copy.
+- Queries: `track-load.py --android --solution <name> --copy-db <file>` copies the
+  database off the emulator after the sync (SQLite's backup on the device, then `adb
+  pull`); run `time-queries.mjs` on the copy.
 - Run one platform at a time and never compare an Android run with an iOS one; the
   report records the device.
 
@@ -107,7 +122,9 @@ use.
    app's simulator build installs with `xcrun simctl install <udid> <path>.app`. Time on
    the simulator, not a phone: the phone debug connection can stall after sign-in and
    never answer queries.
-3. **Arm, then start the load.** Arm before signing in, refreshing or opening the screen:
+3. **Arm, then start the load.** Arm before signing in, refreshing or opening the screen.
+   Every sign-in run needs a fresh sign-in: start the tracker, then sign out of the app and
+   sign in again. Tell the user each time; the tracker prints it too:
 
    ```sh
    python3 <skill-directory>/scripts/track-load.py --solution <test-solution> --wait \
@@ -118,7 +135,10 @@ use.
      and a logout may delete it (or keep it; both happened in one session).
    - **Always name `--scopes` for a sign-in or refresh journey.** Without it every scope
      started after arming counts, so a periodic background sync (an appointment-changes
-     pull every few minutes) ends the run early with a one-second "ready".
+     pull every few minutes) ends the run early with a one-second "ready". The names are
+     the sync actions' `instanceId`s (`sync-identity`, `sync-data`), not the progress
+     datasources' names (`identity-data`); a name that matches no scope is reported with
+     the scopes the app has.
    - It prints a line per change, stops when every tracked scope is synced and
      `_commandQueue` is empty for `--settle` seconds (or on a failed entry, or
      `--timeout`), then prints a waterfall and writes `<review>/runs/<label>-summary.json`
@@ -134,8 +154,9 @@ use.
    - **Arm before the load, never during it.** A "Signing out" log line or a recreated
      database starts the run again (a reloaded build can sync once before the sign-out);
      a run armed while the sync was already going ends `invalid`.
-   - After the first baseline run, copy the database for the data check below:
-     `sqlite3 "file:<db>?mode=ro" ".backup 'baseline.db'"`.
+   - After the first baseline run, copy the database for the data check below and for
+     the query timings: `track-load.py --solution <name> --copy-db <review>/before/device.db`
+     (it includes the `-wal` file and opens read-only on its own).
 4. **Three runs per side.** `pre-1..3` on the old build, `post-1..3` on the new one, each
    from the same starting state (fresh login, or the same refresh).
 5. **Compare.**
@@ -144,11 +165,19 @@ use.
    python3 <skill-directory>/scripts/compare-runs.py <review>/runs --before pre --after post
    ```
 
-   It reports medians for first start to ready, the sync work (time any scope is syncing,
-   also after ready), the number of scope starts, each scope and each entry, flags any
-   slowdown over 10% and 0.5 s (a review threshold, not an SLA; smaller steps are one or
-   two samples of noise), and warns on fewer than three runs a side, runs that did not
-   reach ready, or runs from different machines. It writes `comparison.md` for the PR.
+   It reports medians and every run for first start to ready, the sync work (time any
+   scope is syncing, also after ready), the number of scope starts, each scope and each
+   entry, and warns on fewer than three runs a side, runs that did not reach ready, or
+   runs from different machines. It writes `comparison.md` for the PR. Verdicts:
+
+   | Verdict | Means |
+   | --- | --- |
+   | improved / REGRESSION | over 10% and 0.5 s (three sampling intervals for an entry), and every run on one side beats every run on the other |
+   | same | under 10% |
+   | within noise | over 10%, but a time under the noise floor (0.26 → 0.78 s is two samples) |
+   | unclear | the medians moved, but the runs overlap: a call whose time varies (an OAuth login call: 1.8–5.6 s) |
+   | parallel now | slower because it now runs beside other calls; the total says whether that paid off |
+   | not comparable | an entry of a scope that synced twice in a run: the repeat restarted it |
    Leave a cold first run (solution download, first sign-in) out of the medians, or
    report it separately.
 

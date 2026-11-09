@@ -101,7 +101,7 @@ app and the test user signed in.
 |---|---|---|---|
 | Homebrew | the installs below | `/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"` (asks for the password: the user runs it with `!`) | `brew --version` |
 | Node 22.5+ | query timing (`node:sqlite`) | `brew install node@22`, or `nvm install 22` when they use nvm | `node --version` |
-| Java 17+ | Maestro | `brew install openjdk@17`, then `export JAVA_HOME=$(/usr/libexec/java_home -v 17)` (if `java_home` does not find it: `! sudo ln -sfn $(brew --prefix)/opt/openjdk@17/libexec/openjdk.jdk /Library/Java/JavaVirtualMachines/openjdk-17.jdk`) | `java -version` |
+| Java 17+ | Maestro | `brew install openjdk@17`. Nothing else: `time-screens.py` runs Maestro with an installed Java 17+ even when another Java is active (JAVA_HOME for its process only). Do not change `JAVA_HOME` in `~/.zshrc`: the user may pin another Java on purpose. To run `maestro` by hand: `JAVA_HOME="$(brew --prefix)/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home" maestro …` | `preflight.py` (its Java line) |
 | Maestro | screen and cold-start timing | `brew install mobile-dev-inc/tap/maestro` (the `curl … get.maestro.mobile.dev` script is often blocked) | `maestro --version` |
 | `jigx_debug` MCP | SDK projects: publishing and the device database | the Jigx MCP setup for Claude Code | `/mcp` lists `jigx_debug` |
 
@@ -114,7 +114,7 @@ app and the test user signed in.
 | `simctl boot` hangs or the simulator stays black | stale simulator service | `xcrun simctl shutdown all`, `killall -9 com.apple.CoreSimulator.CoreSimulatorService`, boot again |
 | `No devices are booted` / Maestro "No connected devices" | nothing booted, or Maestro started before boot finished | boot, wait for the home screen, run again |
 | `simctl install` "Failed to install the app" / wrong architecture | an `.ipa` or a device build | it needs the simulator build (`.app`) |
-| Maestro `Unable to locate a Java Runtime` or `UnsupportedClassVersionError` | no Java, or Java older than 17 (macOS's `/usr/bin/java` is only a stub) | install Java 17 and set `JAVA_HOME` (Tools) |
+| Maestro `Unable to locate a Java Runtime` or `UnsupportedClassVersionError` | no Java, or Java older than 17 (macOS's `/usr/bin/java` is only a stub) | install Java 17 (Tools); `time-screens.py` finds it. Running `maestro` by hand: set `JAVA_HOME` for that command only |
 | Maestro stalls on the first iOS run | it builds and installs its XCTest driver once | wait up to two minutes; later runs are quick |
 | `adb: command not found` | platform-tools not on the path | the `export` lines under Android step 1 |
 | `adb devices` shows `unauthorized` | phone prompt not accepted | accept "Allow USB debugging" on the phone; replug |

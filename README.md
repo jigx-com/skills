@@ -6,8 +6,9 @@ This repository contains three separate skills:
 
 - `jigx` - generic Jigx Core SDK app-building recipes.
 - `jigx-acumatica` - Acumatica-specific integration recipes for Jigx apps.
-- `jigx-performance` - on-device SQLite and datasource performance: measuring,
-  expression indexes, list query shape, and verifying a change.
+- `jigx-performance` - audits a Jigx solution for sync and performance problems (a
+  prioritized report: what is wrong, where, the fix), times it in the iOS Simulator and
+  on Android, and measures fixes before and after.
 
 The skills are intentionally split so generic Jigx guidance can remain reusable while
 Acumatica conventions, endpoint rules, sync behavior, and ERP-specific payload shapes
@@ -32,6 +33,17 @@ If the repository is private or you prefer SSH, use the Git URL:
 ```sh
 npx skills add git@github.com:jigx-com/skills.git --skill jigx --skill jigx-acumatica --skill jigx-performance --agent claude-code --agent codex --global
 ```
+
+### Install From A Branch (Testing A PR)
+
+Name the branch after `#`; a branch name with a slash works this way, a GitHub
+`/tree/<branch>` URL does not:
+
+```sh
+npx skills add "jigx-com/skills#<branch>" --skill jigx-performance --agent claude-code --global --yes
+```
+
+Restart Claude Code afterwards so it loads the new version.
 
 ### Install For One Agent
 
@@ -110,24 +122,21 @@ solution. It loads on its own when you write queries, indexes or lists.
 ## Check a solution's performance
 
 Open the solution in Claude Code (a YAML folder with `index.jigx`, or a TypeScript SDK
-project) and type:
+project) and type one of these:
 
-```text
-/jigx-performance
-```
+| Type | What happens | Needs |
+| --- | --- | --- |
+| `/jigx-performance audit` | **Code check**: what is wrong, where and the fix, by priority, in seconds; then it stops | Node 18+ (and Ruby for YAML) |
+| `/jigx-performance` | **Review**: the code check, then: **time it and fix it** (sync, queries, actions and screens timed in the iOS Simulator and on Android, fixes you approve, timed again and compared), **fix the high findings now**, or **stop** | for timing, a simulator or emulator; Claude helps set it up |
 
-Claude finds the solution, audits it in a few seconds and shows what is wrong, where,
-and how to fix it, by priority. Then it asks what next: **time it and fix it** (sync,
-queries, actions and screens timed in the iOS Simulator, fixes you approve, timed
-again and compared), **fix the high findings now**, or **stop**. It tells you if a tool
-the timing needs is missing.
+Nothing is written into your repo, and fixes go on a new branch only after you approve
+them.
 
 Before a PR into the solution's main branch, check the branch adds no new high
-findings:
+findings (run it from anywhere in the solution repo):
 
 ```sh
-node skills/jigx-performance/scripts/check-performance.mjs path/to/solution \
-  --baseline main-audit.json --fail-on high --report audit.md > audit.json
+node ~/.claude/skills/jigx-performance/scripts/pr-check.mjs --base origin/main --report perf-check.md
 ```
 
 [`skills/jigx-performance/USAGE.md`](skills/jigx-performance/USAGE.md) has the rest:

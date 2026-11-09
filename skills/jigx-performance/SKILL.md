@@ -24,10 +24,18 @@ user-facing guide: every audit rule with its priority, and every script's flags.
 
 ## Always
 
-- **Never change the branch that is checked out.** The code check and timing are
-  read-only. Approved fixes go on a new branch `perf/<short-name>` in a separate worktree
-  (`git worktree add ../<repo>-perf -b perf/<short-name>`), and you say so before the
-  first change.
+- **The solution repo's own agent rules win.** Before the first change, read its
+  `AGENTS.md` / `CLAUDE.md` and what they route to (rules, application guidance, branch
+  guidance). Where they differ from this skill on branches, worktrees, branch names,
+  installs, checks or commits, follow the repo.
+- **Never commit to the branch that was checked out when the review started, and never
+  switch branches without asking.**
+  The code check and timing are read-only. Before the first fix, ask once where the fixes
+  go and recommend what the repo's rules allow: a new branch from the checked-out one in
+  this checkout (`git switch -c <name>`, named the repo's way, e.g. `perf/CU-<ticket>-<what>`;
+  stop if unrelated uncommitted changes would come along), or a separate worktree
+  (`git worktree add`) when the repo allows it or the user asks. Then install
+  dependencies if the repo says so after a checkout (e.g. `yarn install --frozen-lockfile`).
 - **Write outputs to the review folder** that `preflight.py` prints,
   `~/jigx-perf-reviews/<solution>/<branch>/` (`<review>` below), never into the repo.
 - **SDK projects:** run `jigx build` first when `build/output.json` is missing or older
@@ -88,9 +96,14 @@ Follow `references/customer-review.md` for the details of each step.
    screens to time and the test data.
 5. **Time the current solution** on the test solution (YAML: `copy-to-test.py`, then Jigx
    Builder; SDK: `jigx_debug`), per `references/run-and-track.md`:
-   - sync: `track-load.py`, three runs (`--android` on an emulator)
-   - queries and actions: `time-queries.mjs --scale 10` on the test user's database
-   - screens and cold start: `time-screens.py`, three runs a screen
+   - sync: `track-load.py`, three runs (`--android` on an emulator). Each run is a fresh
+     sign-in: start the tracker, then tell the user to sign out and sign in again
+   - queries and actions: `time-queries.mjs --scale 10` on a copy made with
+     `track-load.py --copy-db` after the sync (a plain `cp` loses the rows in the `-wal`
+     file). Check its guessed parameters are records the screens really show
+   - screens and cold start: `time-screens.py`, three runs a screen. Find ids with
+     `time-screens.py --ids`; pick a ready element that renders last in the part you are
+     timing; put set-up such as picking a project in the spec's `prepare`
 
    Time iOS and Android when both are set up, one at a time; close an emulator before
    starting another.
@@ -100,8 +113,11 @@ Follow `references/customer-review.md` for the details of each step.
    a measured slow step, an expression error) or **Optional**, and list what is left
    alone and why.
 7. **Stop and ask.** Recommend every **Needs fixing** change; the user may pick sections.
-8. **Apply** approved sections one commit each on the perf branch, rebuild and check
-   after each, publish to the same test solution and **time everything again** (`post`).
+8. **Apply** approved sections one commit each on the fix branch. Read the repo's
+   application guidance before changing sync, guard or write behaviour. After each
+   section rebuild (SDK) and run the repo's own checks on the changed files (e.g. `yarn
+   validate <file.jigx>`, `yarn cc:changed --base <base>`, listed in its README) and the
+   audit, then publish to the same test solution and **time everything again** (`post`).
    Compare with `compare-runs.py`, `time-queries.mjs --baseline` and
    `time-screens.py --compare`, and show `<review>/report.md`: what got faster, what did
    not move, any regression, what was not verified.
