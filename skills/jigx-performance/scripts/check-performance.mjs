@@ -430,10 +430,29 @@ export function where(path, sources = {}) {
 
 // stats: optional {table: {rows, bytes}} from a device database (tableStats), to size sync findings.
 export function checkPerformance(app, {stats = null, sources = {}} = {}) {
+  // A when: that can be false. One that always holds guards nothing: true, or a call to a script
+  // function whose every return is `return true` (a logging helper such as $utils.logSomething).
+  const scriptBodies = new Map();
+  for (const files of Object.values(app.scripts ?? {})) for (const [file, text] of Object.entries(files ?? {}))
+    if (typeof text === 'string') for (const f of scriptFunctions(text)) scriptBodies.set(`${file.replace(/\.js$/, '')}.${f.name}`, f.body);
+  const realGuard = w => {
+    if (w === undefined || w === null || w === true) return false;
+    const s = String(w).trim();
+    if (/^=?\s*true$/i.test(s)) return false;
+    const call = /^=\s*\$([\w-]+)\.(\w+)\s*\([^]*\)\s*$/.exec(s);
+    const body = call && scriptBodies.get(`${call[1]}.${call[2]}`);
+    if (body !== undefined && body !== null) {
+      const returns = [...body.matchAll(/\breturn\b([^;\n}]*)/g)].map(r => r[1].trim());
+      if (returns.length && returns.every(r => r === 'true')) return false;
+    }
+    return true;
+  };
+  // An action's own guard: its top-level when:, which decides whether any of it runs.
+  const actionGuarded = name => { const def = app.actions?.[name]; return !!def && realGuard(def.when ?? def.action?.when); };
   // Whether an action syncs, itself or through the actions it calls (three levels).
-  const actionSyncs = (name, depth = 0, seen = new Set()) => {
+  const actionSyncs = (name, depth = 0, seen = new Set(), ownGuard = true) => {
     const def = app.actions?.[name];
-    if (!def || depth > 3 || seen.has(name)) return false;
+    if (!def || depth > 3 || seen.has(name) || (ownGuard && actionGuarded(name))) return false;
     seen.add(name);
     let hit = false;
     walk(def, v => {
@@ -477,7 +496,7 @@ export function checkPerformance(app, {stats = null, sources = {}} = {}) {
       // three levels): onLoad usually calls sync actions by name, one after another.
       const steps = asArray(node.options.actions);
       const direct = steps.filter(a => a?.type === 'action.sync-entities').length;
-      const called = steps.filter(a => a?.type === 'action.execute-action' && a.when === undefined && actionSyncs(a.options?.action)).map(a => a.options.action);
+      const called = steps.filter(a => a?.type === 'action.execute-action' && !realGuard(a.when) && actionSyncs(a.options?.action)).map(a => a.options.action);
       const n = direct + called.length;
       if (n >= 4 || called.length >= 3) add('sequential-sync-steps', path,
         `${n} sync steps run one after another${called.length ? ` (${called.join(', ')})` : ''}; network waits add up.`);
@@ -593,7 +612,7 @@ export function checkPerformance(app, {stats = null, sources = {}} = {}) {
     const real = names.filter(e => boundEntities.has(e));
     // One table per step is the documented trade-off (the entity also creates a missing table): medium.
     if (real.length) add('ddl-invalidates-datasources', path,
-      `Index DDL lists ${real.join(', ')} in entities:, which re-runs every datasource bound to them (~6.6 s measured on device).`,
+      `Index DDL lists ${real.join(', ')} in entities:, which re-runs every datasource bound to them each time it runs; time it with track-load.py.`,
       {priority: real.length === 1 ? 'medium' : 'high'});
     if (created.some(c => !c.ifNotExists)) add('index-not-idempotent', path, 'CREATE INDEX without IF NOT EXISTS fails the step on a re-run.');
     // A table listed in entities: is created if missing, so only unlisted tables can fail.
@@ -666,11 +685,20 @@ export function checkPerformance(app, {stats = null, sources = {}} = {}) {
 
   // Table-change handlers run on every write to their table; system tables change all through a sync.
   const HOT = new Set(['_syncstatus', '_syncscope', '_commandqueue', '_filestatus']);
+  // A handler on a table only a sync writes (an event table synced to trigger it) runs once per
+  // sync that brings changes, which is what it is for; only a table the app writes itself, or a
+  // system table, changes often enough to need a guard.
+  const appWrites = new Set();
+  walk(app, v => {
+    if (!v || typeof v !== 'object' || !/^action\.(execute-sql|execute-entit(y|ies))$/.test(v.type ?? '')) return;
+    for (const e of [...asArray(v.options?.entities), v.options?.entity]) if (e) appWrites.add(tableName(typeof e === 'string' ? e : e.entity ?? ''));
+  });
   asArray(app.onTableChanged).forEach((h, i) => {
     const table = String(h?.table ?? asArray(h?.tables)[0] ?? '');
     const guard = h?.when ?? h?.action?.when;
     const p = `$.onTableChanged.${i}`;
-    if (guard === undefined) add('table-change-unguarded', p, `Every change to ${table} runs this handler's ${h?.action?.options?.actions?.length ?? 1} step(s) with no when: guard.`,
+    const hot = HOT.has(table.toLowerCase());
+    if (!realGuard(guard) && (hot || appWrites.has(tableName(table)))) add('table-change-unguarded', p, `Every change to ${table} runs this handler's ${h?.action?.options?.actions?.length ?? 1} step(s) with no when: guard.`,
       {priority: HOT.has(table.toLowerCase()) ? 'high' : 'medium'});
     else if (HOT.has(table.toLowerCase()) && /@ctx\.datasources\./.test(String(guard)))
       add('table-change-hot-guard', p, `The guard on ${table} reads datasources, and runs on every status write during sync.`);
@@ -698,10 +726,10 @@ export function checkPerformance(app, {stats = null, sources = {}} = {}) {
 
   // onFocus runs every time the screen is shown. Unguarded sync steps reached from it, through
   // execute-action up to three levels: how many entities they sync and which actions they run.
-  const focusSyncs = (node, depth = 0, out = {entities: 0, tables: [], actions: new Set(), syncers: new Set()}, owner = null) => {
+  const focusSyncs = (node, depth = 0, out = {entities: 0, tables: [], actions: new Set(), syncers: new Set(), guarded: new Set()}, owner = null) => {
     walk(node, v => {
       if (!v || typeof v !== 'object') return false;
-      if (v.when !== undefined && v !== node) return false; // a guarded branch is fine
+      if (v !== node && realGuard(v.when)) return false; // a guarded branch is fine
       if (v.type === 'action.sync-entities') {
         const list = asArray(v.options?.entities);
         out.entities += Math.max(1, list.length);
@@ -711,6 +739,8 @@ export function checkPerformance(app, {stats = null, sources = {}} = {}) {
       }
       const target = v.type === 'action.execute-action' && v.options?.action;
       if (typeof target === 'string' && depth < 3 && !out.actions.has(target) && app.actions?.[target]) {
+        // The called action's own when: guards all of it, like a when: on the step.
+        if (actionGuarded(target)) { if (actionSyncs(target, 0, new Set(), false)) out.guarded.add(target); return false; }
         out.actions.add(target);
         focusSyncs(app.actions[target].action ?? app.actions[target], depth + 1, out, target);
       }
@@ -720,20 +750,22 @@ export function checkPerformance(app, {stats = null, sources = {}} = {}) {
   // What the app's own start runs: a screen that runs it again on focus repeats the full sync.
   const startActions = app.onLoad ? focusSyncs(app.onLoad).actions : new Set();
   for (const [name, jig] of Object.entries(app.jigs ?? {})) {
-    if (!jig?.onFocus || jig.onFocus.when !== undefined) continue;
+    if (!jig?.onFocus || realGuard(jig.onFocus.when)) continue;
     const f = focusSyncs(jig.onFocus);
     if (!f.entities) continue;
     const syncers = [...f.syncers];
     const again = syncers.filter(a => startActions.has(a));
-    const heavy = again.length > 0 || f.entities >= 5;
-    // Name the tables, not only the actions: "8 entities (7 names)" read as a miscount.
+    // Name the tables, not only the actions: "8 entities (7 names)" read as a miscount. A table
+    // listed twice is one sync, so the distinct tables decide how heavy it is.
     const uniq = [...new Set(f.tables)];
+    const heavy = again.length > 0 || uniq.length >= 5;
     const twice = uniq.filter(t => f.tables.filter(x => x === t).length > 1);
     const tables = uniq.length ? ` (${uniq.slice(0, 8).join(', ')}${uniq.length > 8 ? ', …' : ''}${twice.length ? `; ${twice.join(', ')} more than once` : ''})` : '';
     const what = syncers.length ? ` through ${syncers.join(', ')}` : '';
     add('heavy-focus', `$.jigs.${name}.onFocus`,
       `Opening the screen syncs ${f.entities} ${f.entities === 1 ? 'entity' : 'entities'}${tables}${what} every time, with no when: guard` +
-      (again.length ? `; ${again.join(', ')} is the same sync the app runs on start.` : '.'), heavy ? {priority: 'high'} : {});
+      (again.length ? `; ${again.join(', ')} is the same sync the app runs on start.` : '.') +
+      (f.guarded.size ? ` Not counted: ${[...f.guarded].join(', ')}, which syncs only when its own when: holds.` : ''), heavy ? {priority: 'high'} : {});
   }
 
   // Expression scripts: JSONata for simple logic, JavaScript for what JSONata cannot express clearly.
@@ -770,7 +802,9 @@ export function checkPerformance(app, {stats = null, sources = {}} = {}) {
 
   // Sync: tables nothing reads, full pulls, unselected fields and payload size.
   const sql = sqlText.toLowerCase();
-  const isRead = t => readTables.has(t) || new RegExp(`(^|[^\\w-])${escapeRe(t)}([^\\w-]|$)`).test(sql);
+  // A table a table-change handler watches is read: syncing it is what starts the handler.
+  for (const h of asArray(app.onTableChanged)) for (const t of [h?.table, ...asArray(h?.tables)]) if (t) readTables.add(tableName(String(t)));
+  const isRead = t => readTables.has(t) ||new RegExp(`(^|[^\\w-])${escapeRe(t)}([^\\w-]|$)`).test(sql);
   const seen = new Set();
   const entryText = s => {
     const fn = app.functions?.[s.entry.function] ?? {};

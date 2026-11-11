@@ -517,3 +517,58 @@ test('expression safety: bracketed guards count, keys are low, and the report gi
   assert.match(md, /## Expression safety \(1: 1 medium, 0 low\)/);
   assert.doesNotMatch(md, /### expression-may-throw/);
 });
+
+test('a called action guarded by its own when: is not an unguarded focus sync; an always-true when guards nothing', () => {
+  // KOI Sales: Home runs act-wipe on focus, and act-wipe syncs inventory only when the wipe status changed.
+  const sync = entities => ({type: 'action.sync-entities', options: {provider: 'DATA_PROVIDER_DYNAMIC', entities}});
+  const run = action => ({type: 'action.execute-action', options: {action}});
+  const app = {
+    scripts: {expressions: {'utils.js': 'export function logSomething(input) {\n  console.debug(input)\n  return true\n}\n'}},
+    actions: {
+      'act-wipe': {action: {type: 'action.action-list', when: '=$utils.wipeNeeded(@ctx.datasources.local, @ctx.datasources.remote)',
+        options: {isSequential: true, actions: [run('act-inventory')]}}},
+      'act-inventory': {action: sync(['default/inventory'])},
+      'act-logged': {action: {type: 'action.action-list', when: '=$utils.logSomething("syncing")', options: {actions: [sync(['default/orders'])]}}},
+    },
+    jigs: {
+      home: {type: 'jig.default', onFocus: {type: 'action.action-list', options: {isSequential: true, actions: [
+        sync(['default/settings', 'default/wipe', 'default/settings']), run('act-wipe')]}}},
+      orders: {type: 'jig.default', onFocus: run('act-logged')},
+    },
+  };
+  const focus = checkPerformance(app).findings.filter(f => f.code === 'heavy-focus');
+  const home = focus.find(f => /home/.test(f.where));
+  assert.match(home.message, /syncs 3 entities \(settings, wipe; settings more than once\) every time/);
+  assert.match(home.message, /Not counted: act-wipe, which syncs only when its own when: holds/);
+  assert.doesNotMatch(home.message, /inventory/);
+  assert.equal(home.priority, 'medium');
+  // logSomething only returns true, so its when: always holds: the orders sync still runs on every focus.
+  assert.match(focus.find(f => /orders/.test(f.where)).message, /syncs 1 entity \(orders\) through act-logged every time/);
+});
+
+test('event tables synced to start a table-change handler are read, and their handler needs no guard', () => {
+  const sync = entities => ({type: 'action.sync-entities', options: {provider: 'DATA_PROVIDER_DYNAMIC', entities}});
+  const handler = table => ({table, action: {type: 'action.action-list', options: {actions: [{type: 'action.execute-action', options: {action: 'refresh'}}]}}});
+  const app = {
+    onLoad: sync([{entity: 'default/orderEvents', function: 'get-events'}]),
+    onTableChanged: [handler('default/orderEvents'), handler('default/drafts')],
+    functions: {'get-events': {method: 'GET', url: 'https://{u}Events', parameters: {$select: {value: 'id'}, $filter: {value: "LastModified gt '2026-01-01'"}}}},
+    actions: {
+      refresh: {action: sync(['default/orders'])},
+      save: {action: {type: 'action.execute-entity', options: {provider: 'DATA_PROVIDER_LOCAL', entity: 'default/drafts', method: 'save', data: {id: 1}}}},
+    },
+  };
+  const f = checkPerformance(app).findings;
+  assert.ok(!f.some(x => x.code === 'synced-table-unread' && /orderevents/.test(x.message)));
+  // orderEvents changes only when a sync brings changes; drafts is written by the app on every save.
+  assert.deepEqual(f.filter(x => x.code === 'table-change-unguarded').map(x => x.where), ['index › onTableChanged.1']);
+});
+
+test('the index DDL finding states no timing from another solution', () => {
+  const app = {actions: {idx: {action: {type: 'action.execute-sql', options: {entities: ['customers'],
+    statements: [{statement: 'CREATE INDEX IF NOT EXISTS i ON [customers] (json_extract(data, \'$.id\'))'}]}}}},
+    datasources: {c: ds('SELECT id FROM [customers]', ['customers'])}};
+  const ddl = checkPerformance(app).findings.find(f => f.code === 'ddl-invalidates-datasources');
+  assert.ok(ddl);
+  assert.doesNotMatch(ddl.message, /\d+(\.\d+)? s\b/);
+});
