@@ -21,6 +21,9 @@ threshold, not an SLA. Verdicts, checked against the runs and not only the media
   improved / REGRESSION   every run on one side beats every run on the other
 
 A scope is compared by its first sync (a repeat sync before a fix moves its last start).
+A run more than twice the median of the others on its side, the first sign-in after installing
+the app, or one during which another solution synced is named in the warnings; --exclude
+<label> leaves it out.
 
 Writes <folder>/comparison.md and comparison.json, and prints the markdown. Android runs
 (--before pre-android --after post-android) write comparison-android.md and .json.
@@ -149,6 +152,22 @@ def compare(before, after, threshold=10.0, min_change=0.5):
         repeated = sorted({sid for r in runs for sid in r.get("repeated_scopes", [])})
         if repeated:
             warnings.append(f"{side}: {', '.join(repeated)} synced more than once in a run")
+    # A run far slower than the rest of its side (or one the tracker marked) distorts the median:
+    # name it, with why when known, and how to leave it out.
+    for side, runs in (("before", before), ("after", after)):
+        for r in runs:
+            why = []
+            if r.get("first_sign_in_after_install"):
+                why.append("the first sign-in after installing the app")
+            if r.get("other_solutions_synced"):
+                why.append(f"{', '.join(r['other_solutions_synced'])} synced during it")
+            v, rest = r.get("first_start_to_ready_s"), [o.get("first_start_to_ready_s") for o in runs if o is not r]
+            rest = [x for x in rest if x is not None]
+            if v is not None and len(rest) >= 2 and v > 2 * statistics.median(rest):
+                why.append(f"{v}s against {', '.join(f'{x:g}' for x in rest)} for the others")
+            if why:
+                warnings.append(f"{side} run {r['label']} is not like the others ({'; '.join(why)}): run it again, "
+                                f"or leave it out with --exclude {r['label']}")
     machines = {r.get("machine") for r in before + after}
     if len(machines) > 1:
         warnings.append("runs come from different machines: " + "; ".join(sorted(m or "?" for m in machines)))
@@ -202,13 +221,18 @@ def main(argv=None):
     p.add_argument("--before", default="pre")
     p.add_argument("--after", default="post")
     p.add_argument("--threshold", type=float, default=10.0, help="percent slowdown to flag")
+    p.add_argument("--exclude", default="", help="comma-separated run labels to leave out (e.g. a first sign-in after install)")
     p.add_argument("--min-change", type=float, default=0.5,
                    help="seconds; smaller changes are 'same', or 'within noise' when over --threshold percent (sampling resolution)")
     args = p.parse_args(argv)
-    before, after = load(args.folder, args.before), load(args.folder, args.after)
+    skip = {x for x in args.exclude.split(",") if x}
+    before, after = ([r for r in load(args.folder, side) if r.get("label") not in skip] for side in (args.before, args.after))
     if not before or not after:
         p.error(f"need {args.before}*-summary.json and {args.after}*-summary.json in {args.folder}")
     report = compare(before, after, args.threshold, args.min_change)
+    if skip:
+        report["excluded"] = sorted(skip)
+        report["warnings"].append(f"left out: {', '.join(sorted(skip))}")
     md = markdown(report)
     name = "comparison-android" if args.before.endswith("-android") else "comparison"
     with open(os.path.join(args.folder, f"{name}.json"), "w", encoding="utf-8") as f:

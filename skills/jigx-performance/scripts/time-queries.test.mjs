@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {atScale, collect, compareTimings, dataKeys, growth, guessParam, paramNames, sampleQueries, scaleDatabase, sqlLiterals, timeSolution} from './time-queries.mjs';
+import {atScale, collect, compareTimings, dataKeys, growth, guessParam, paramNames, sampleQueries, scaleDatabase, sqlLiterals, stateKey, timeSolution, timingsReport} from './time-queries.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -157,4 +157,37 @@ test('an empty database copy stops with how to copy it', {skip: !sqlite && 'node
   const out = spawnSync(process.execPath, [new URL('./time-queries.mjs', import.meta.url).pathname, path.join(dir, 'output.json'), '--db', empty], {encoding: 'utf8'});
   assert.equal(out.status, 2);
   assert.match(out.stderr, /has no data rows .*--copy-db/s);
+});
+
+test('parameters that read one solution-state value get one value, the busiest, padding kept; empty tables are not measured', {skip: !sqlite && 'node:sqlite needs Node 22.5+'}, () => {
+  // Project Central: 26 queries read @ctx.solution.state.active-project under four spellings of the name.
+  const db = new sqlite.DatabaseSync(':memory:');
+  db.exec('CREATE TABLE [default/drawinglogs] (id TEXT PRIMARY KEY, data TEXT); CREATE TABLE [default/submittals] (id TEXT PRIMARY KEY, data TEXT); CREATE TABLE [default/photologs] (id TEXT PRIMARY KEY, data TEXT)');
+  const put = (t, rows) => rows.forEach((p, i) => db.prepare(`INSERT INTO [${t}] VALUES (?, ?)`).run(`${t}${i}`, JSON.stringify({ProjectId: p})));
+  // The first row is a quiet project; the busiest across both tables is the padded "BUDGETBYM ".
+  put('default/drawinglogs', ['QUIET', 'BUDGETBYM ', 'BUDGETBYM ']);
+  put('default/submittals', ['QUIET', 'BUDGETBYM ', 'OTHER']);
+  const active = '=@ctx.solution.state.active-project';
+  const q = (t, name) => ds(`SELECT id FROM [${t}] WHERE json_extract(data, '$.ProjectId') = @${name}`, {entities: [t], queryParameters: {[name]: active}});
+  const app = {datasources: {a: q('default/drawinglogs', 'ProjectId'), b: q('default/submittals', 'projectID'), c: q('default/photologs', 'Project')}};
+  assert.equal(stateKey(active), 'active-project');
+  assert.equal(stateKey('=@ctx.solution.state.a & "x"'), undefined);
+  const r = timeSolution(app, db, {runs: 1});
+  assert.deepEqual(r.state['active-project'], {value: 'BUDGETBYM ', rows: 3, from: ['default/drawinglogs', 'default/submittals'], queries: 3});
+  const by = Object.fromEntries(r.queries.map(x => [x.where, x]));
+  assert.equal(by['datasources/a'].rows, 2);
+  assert.equal(by['datasources/b'].rows, 1);
+  assert.deepEqual(by['datasources/b'].state, {projectID: 'active-project'});
+  assert.deepEqual(by['datasources/b'].unbound, []);
+  // photologs syncs only after a project is picked: empty in this copy, so not a measurement
+  assert.deepEqual(by['datasources/c'].emptyTables, ['default/photologs']);
+  const report = timingsReport({title: 't', result: r, meta: {host: 'h', sqlite: '3', db: 'd', rows: 6, tables: 3, runs: 1}});
+  assert.match(report, /active-project = "BUDGETBYM " \(3 rows in default\/drawinglogs, default\/submittals\), for 3 queries/);
+  assert.match(report, /## Empty tables: not measured \(1 queries\)[^]*default\/photologs/);
+  assert.equal(compareTimings({queries: [{where: 'datasources/c', ms: 1, emptyTables: ['default/photologs']}]},
+    {queries: [{where: 'datasources/c', ms: 0.1}]})[0].verdict, 'not measured (empty tables)');
+  // params.json can pin the state by its name
+  const pinned = timeSolution(app, db, {runs: 1, params: {'active-project': 'QUIET'}});
+  assert.deepEqual(pinned.state['active-project'], {value: 'QUIET', given: true, queries: 3});
+  assert.equal(pinned.queries.find(x => x.where === 'datasources/a').rows, 1);
 });

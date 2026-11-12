@@ -177,11 +177,12 @@ YAML folder or an SDK `build/output.json`.
 | `check-performance.mjs` | the audit (`--report`, `--list-low`, `--db`, `--baseline`, `--fail-on`) |
 | `pr-check.mjs` | the PR regression check against the target branch (CI: `ci/jigx-performance.yml`) |
 | `check-plans.py` | query plans: full scans, unused indexes, CI guards |
-| `time-queries.mjs` | every query, action and index build timed on a device database copy (`--scale 10`, `--baseline`) |
+| `check-syntax.mjs` | every `.jigx` file parses as YAML and every `=` expression as JSONata, in any folder (a repo or a copy); run it on the changed files before publishing |
+| `time-queries.mjs` | every query, action and index build timed on a device database copy (`--scale 10`, `--baseline`; `--params` by parameter or by solution-state name; queries that read only empty tables are listed as not measured) |
 | `preflight.py` | the first thing `/jigx-performance` shows: solution, branch and commit, devices and Jigx apps, and each setup step timing still needs with its fix |
 | `copy-to-test.py` | a YAML solution copied to a test solution name, with the Builder organisation settings, for publishing |
-| `time-screens.py` | screen and cold-start times through Maestro, iOS or Android (`--platform`, `--compare`; `--ids` prints the ids on the screen) |
-| `track-load.py` / `compare-runs.py` | live sync tracking in the iOS Simulator or an Android emulator (`--android`), and a database copy for the query timings (`--copy-db`); before/after medians and every run |
+| `time-screens.py` | screen and cold-start times through Maestro, iOS or Android (`--platform`, `--compare`; `--ids` prints the ids on the screen, `--at <screen>` / `--tap` get there first); a cold start also lists what the app logged |
+| `track-load.py` / `compare-runs.py` | live sync tracking in the iOS Simulator or an Android emulator (`--android`), and a database copy for the query timings (`--copy-db`); before/after medians and every run; a run unlike the others (the first sign-in after install) is named, and `--exclude` leaves it out |
 | `profile-query.py` | one query at 1x and 10x data, before and after an index |
 | `review-report.py` | the before/after report |
 

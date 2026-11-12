@@ -53,7 +53,9 @@ round. Ids beat texts for navigation: a pushed screen's back button is `<jig-id>
 (list screens: `navigation-bar-extended.back-button.icon`), a tab is
 `tab-bar.<uuid>-<name>`, and a tab's text starts with its icon glyph, so match it with
 `.*Home`, not `Home`. `--ids` prints the ids and texts on the screen now (from `maestro
-hierarchy`, without layout noise). Never use the More tab or the solution switcher as a
+hierarchy`, without layout noise); given the spec it runs the prepare steps first, `--at
+<screen>` also follows that screen's setup and tap, and `--tap <text|id:ID>` taps on the way, so
+one call lists the ids of the screen you want to time. Never use the More tab or the solution switcher as a
 control screen: one wrong tap switches solution.
 
 Maestro's first iOS run builds and installs its driver (a minute or two), so an untimed
@@ -73,6 +75,8 @@ Examples:
   python3 time-screens.py screens.json --label pre-android --platform android --device emulator-5554
   python3 time-screens.py screens.json --print-flow appointments-list
   python3 time-screens.py --ids
+  python3 time-screens.py screens.json --ids --at photo-logs     # the ids of the screen photo-logs opens
+  python3 time-screens.py --ids --tap "id:tab-bar.1-projects" --tap "BUDGETBYM"
 
 Maestro needs Java 17+. When the active java is older and a Java 17+ is installed, Maestro
 is run with that one (JAVA_HOME for its process only; the shell profile is not changed).
@@ -84,10 +88,12 @@ import os
 import platform as platform_mod
 import re
 import shutil
+import sqlite3
 import statistics
 import subprocess
 import sys
 import tempfile
+import time
 
 MARK = "JIGX_SCREEN"
 TIMEOUT_MS = 30000
@@ -193,6 +199,31 @@ def prepare_flow(app_id, prepare, platform="ios"):
     return "\n".join(lines) + "\n"
 
 
+def tap_target(text):
+    """A --tap value: "id:<id>" taps an id, anything else a text (a regular expression)."""
+    return {"id": text[3:]} if text.startswith("id:") else text
+
+
+def path_flow(app_id, spec=None, platform="ios", at=None, taps=()):
+    """An untimed flow to where --ids should look: the spec's prepare steps, then the setup and tap
+    of the screen named `at`, then any --tap steps, then a wait for the screen to settle."""
+    lines = [f"appId: {app_id}", "---", "- launchApp:", "    stopApp: false"]
+    for st in steps((spec or {}).get("prepare"), platform):
+        lines += step_yaml(st, platform)
+    if at:
+        screen = next((x for x in (spec or {}).get("screens", []) if x["name"] == at), None)
+        if screen is None:
+            raise ValueError(f"no screen {at!r} in the spec")
+        for st in steps(screen.get("setup"), platform):
+            lines += step_yaml(st, platform)
+        if screen.get("tap"):
+            lines += tap_yaml(screen["tap"])[0]
+    for t in taps:
+        lines += tap_yaml(tap_target(t))[0]
+    lines += ["- waitForAnimationToEnd:", f"    timeout: {SETTLE_MS}"]
+    return "\n".join(lines) + "\n"
+
+
 def screen_ids(hierarchy):
     """(id, text) of every element with an id in `maestro hierarchy` JSON, layout noise dropped."""
     out, seen = [], set()
@@ -271,6 +302,60 @@ def run_once(app_id, screen, maestro, device=None, platform="ios", reset=None, r
         return (ms, settled), None
 
 
+SECRET = re.compile(r"((?:Basic|Bearer)\s+)[A-Za-z0-9+/=._~-]+|((?:token|password|secret|apikey|api_key)[\"']?\s*[:=]\s*[\"']?)[^\s\"',}]+", re.I)
+
+
+def log_db_path(app_id, device=None, platform="ios"):
+    """The app's runtime log (jigx.log.db) on an iOS Simulator; None elsewhere."""
+    if platform != "ios":
+        return None
+    out = run(["xcrun", "simctl", "get_app_container", device or "booted", app_id, "data"]) or ""
+    path = os.path.join(out.strip(), "Library", "LocalDatabase", "jigx.log.db") if out.strip() else ""
+    return path if path and os.path.exists(path) else None
+
+
+def log_lines(path, since_ms, until_ms):
+    """WARNING and ERROR lines the app logged in [since, until], redacted: the cold start's own story
+    (an expression error, a gate still blocking) that no sync tracker sees when no sync runs."""
+    if not path:
+        return []
+    rows = []
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=0.5)
+        try:
+            for (message,) in conn.execute("SELECT message FROM _logMessages WHERE timestamp BETWEEN ? AND ? ORDER BY id",
+                                           (since_ms, until_ms)):
+                try:
+                    m = json.loads(message)
+                except ValueError:
+                    continue
+                if m.get("level") in ("WARNING", "ERROR"):
+                    text = SECRET.sub(lambda x: (x.group(1) or x.group(2)) + "***", str(m.get("message", "")))
+                    rows.append({"level": m["level"], "message": re.sub(r"\s+", " ", text)[:160]})
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return []
+    return rows
+
+
+def log_summary(runs):
+    """Per screen: errors and warnings per run, and the most frequent lines across its runs."""
+    logged = [r["log"] for r in runs if r.get("log") is not None]
+    if not logged:
+        return None
+    counts = {}
+    for lines in logged:
+        for line in lines:
+            key = (line["level"], re.sub(r"#\d+ ", "", line["message"]))
+            counts[key] = counts.get(key, 0) + 1
+    top = sorted(counts.items(), key=lambda kv: (kv[0][0] != "ERROR", -kv[1]))[:6]
+    return {"runs": len(logged),
+            "errors": [sum(1 for x in lines if x["level"] == "ERROR") for lines in logged],
+            "warnings": [sum(1 for x in lines if x["level"] == "WARNING") for lines in logged],
+            "top": [{"level": k[0], "message": k[1], "count": n} for k, n in top]}
+
+
 def summarise(results, screens=()):
     ready = {s["name"]: s.get("ready") for s in screens}
     out = {}
@@ -281,7 +366,8 @@ def summarise(results, screens=()):
                      "spread_ms": (max(ok) - min(ok)) if len(ok) > 1 else None,
                      "settled_median_ms": statistics.median(settled) if settled else None,
                      "never_settled": sum(1 for r in runs if r.get("never_settled")),
-                     "ready": ready.get(name), "failed": sum(1 for r in runs if r["ms"] is None)}
+                     "ready": ready.get(name), "failed": sum(1 for r in runs if r["ms"] is None),
+                     **({"log": log_summary(runs)} if log_summary(runs) else {})}
     return out
 
 
@@ -341,6 +427,15 @@ def report(result, comparison=None):
         lines.append(f"| {name} | `{ready_text(s.get('ready'))}` | {med} | {runs} | {settled} | {s['failed']} |")
     lines += ["", "Timed until: the ready element; the time covers what renders before it, not what loads after it. "
               "Settled: until the screen stops moving (animations, late images), not part of the time."]
+    for name, s in result["screens"].items():
+        lg = s.get("log")
+        if not lg:
+            continue
+        lines += ["", f"## Runtime log during {name}", "",
+                  f"Errors per run: {', '.join(map(str, lg['errors']))}; warnings per run: {', '.join(map(str, lg['warnings']))}. "
+                  "Lines the app logged between launch and the end of the run (an expression error, a gate still "
+                  "blocking): what the time was spent on when no sync runs.", ""]
+        lines += [f"- {t['level']} x{t['count']}: {t['message']}" for t in lg["top"]] or ["- none"]
     errors = [(n, r["error"]) for n, s in result["screens"].items() for r in s["runs"] if r.get("error")]
     if errors:
         lines += ["", "## Failed runs", ""] + [f"- {n}: {e}" for n, e in errors[:20]]
@@ -423,12 +518,44 @@ def main(argv=None):
     p.add_argument("--device", help="simulator UDID or adb serial when several are connected")
     p.add_argument("--print-flow", metavar="SCREEN", help="print the generated Maestro flow for one screen and exit")
     p.add_argument("--no-warmup", action="store_true", help="skip the untimed first run that lets Maestro install its driver")
-    p.add_argument("--ids", action="store_true", help="print the ids and texts on the screen now, to pick tap and ready elements")
+    p.add_argument("--ids", action="store_true", help="print the ids and texts on the screen now, to pick tap and ready elements; "
+                   "with a spec, after its prepare steps")
+    p.add_argument("--at", metavar="SCREEN", help="with --ids and a spec: follow that screen's setup and tap first, to list the ids of the screen it opens")
+    p.add_argument("--tap", action="append", default=[], metavar="TEXT|id:ID", help="with --ids: tap this first (repeatable, in order)")
     args = p.parse_args(argv)
     maestro = shutil.which("maestro") or os.path.expanduser("~/.maestro/bin/maestro")
     if args.ids:
         if not os.path.exists(maestro):
             p.error("Maestro is not installed: brew install mobile-dev-inc/tap/maestro")
+        spec = None
+        if args.spec:
+            with open(args.spec, encoding="utf-8") as f:
+                spec = json.load(f)
+        if args.at and not spec:
+            p.error("--at needs the spec file")
+        if (spec and (spec.get("prepare") or args.at)) or args.tap:
+            plat = args.platform or (spec or {}).get("platform") or detect_platform(args.device) or "ios"
+            app_id = args.app_id or (spec or {}).get("appIdAndroid" if plat == "android" else "appId") or (spec or {}).get("appId") \
+                or detect_app(plat, args.device)
+            if not app_id:
+                p.error(f"no --app-id, no appId in the spec, and not exactly one com.jigx.* app on the {plat} device")
+            try:
+                text = path_flow(app_id, spec, plat, args.at, args.tap)
+            except ValueError as e:
+                p.error(str(e))
+            with tempfile.TemporaryDirectory(prefix="jigx-ids-") as tmp:
+                path = os.path.join(tmp, "path.yaml")
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(text)
+                try:
+                    proc = subprocess.run([maestro] + (["--device", args.device] if args.device else []) + ["test", path],
+                                          capture_output=True, text=True, env=maestro_env(), timeout=WARMUP_S)
+                    ok = proc.returncode == 0
+                except subprocess.TimeoutExpired:
+                    ok = False
+            if not ok:
+                print("Could not follow the path (prepare, --at, --tap); the ids below are of the screen it stopped on.",
+                      file=sys.stderr)
         out = subprocess.run([maestro] + (["--device", args.device] if args.device else []) + ["hierarchy"],
                              capture_output=True, text=True, env=maestro_env(), timeout=120).stdout
         try:
@@ -487,6 +614,8 @@ def main(argv=None):
             return 1
     warm = [s for s in screens if s.get("start") != "cold"]
     cold = [s for s in screens if s.get("start") == "cold"]
+    # A cold start with no sync running has nothing for track-load to show: read the app's own log.
+    log_path = log_db_path(app_id, args.device, plat) if cold else None
     if warm and not args.no_warmup:
         print("Warm-up run (untimed; Maestro's first iOS run installs its driver)", file=sys.stderr, flush=True)
         _, err = run_once(app_id, warm[0], maestro, args.device, plat, reset, timeout_s=WARMUP_S)
@@ -502,10 +631,12 @@ def main(argv=None):
                 if len(runs) >= MAX_FAILS_IN_A_ROW and all(r["ms"] is None for r in runs[-MAX_FAILS_IN_A_ROW:]):
                     runs.append({"run": i + 1, "ms": None, "error": f"skipped after {MAX_FAILS_IN_A_ROW} failed runs in a row"})
                     continue
+                started_ms = time.time() * 1000
                 timing, err = run_once(app_id, s, maestro, args.device, plat, reset, restart)
                 ms, settled = timing if timing else (None, None)
                 restart = ms is None
-                runs.append({"run": i + 1, "ms": ms,
+                logged = log_lines(log_path, started_ms, time.time() * 1000) if s.get("start") == "cold" and log_path else None
+                runs.append({"run": i + 1, "ms": ms, **({"log": logged} if logged is not None else {}),
                              **({"never_settled": True} if settled == -1 else {"settled_ms": settled} if settled is not None else {}),
                              **({"error": err} if err else {})})
                 print(f"{s['name']} run {i + 1}: " + (f"{ms} ms" if ms is not None else f"failed ({err})"), file=sys.stderr, flush=True)

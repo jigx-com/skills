@@ -33,6 +33,14 @@ class PreflightTest(unittest.TestCase):
         self.assertIn("Devices: none booted or connected", out)
         self.assertIn("Node 22.5+", out)
         self.assertIn("fix: xcrun simctl boot SIM-1", out)
+        # A long subject is shortened at a word; the hash and branch stay whole (Project Central:
+        # "(base/project-centra, clean" read like a cut branch name).
+        git("-c", "user.email=a@b", "-c", "user.name=a", "commit", "-q", "--allow-empty", "-m",
+            "chore(perf): merge the review fixes (base/project-central/acumatica-project-central)")
+        commit = pf.git(d)["commit"]
+        self.assertTrue(commit.endswith(" …"), commit)
+        self.assertNotIn("(base/project-centra", commit.replace("(base/project-central/", ""))
+        self.assertLessEqual(len(commit.split(" ", 1)[1]), 62)
 
     def test_ready_machine_needs_nothing(self):
         r = report(ios=[{"name": "iPhone 18 Pro", "udid": "SIM-1", "runtime": "iOS-27-0", "jigx_apps": ["com.jigx.frontline"]}],

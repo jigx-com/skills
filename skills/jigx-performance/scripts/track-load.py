@@ -226,6 +226,34 @@ def solution_name(path):
     return m.group(1) if m else os.path.basename(path)
 
 
+def solution_id(path):
+    """The solution's id: the uuid in jigx.solution.___<name>___.<uuid>.db, which log lines carry as solutionId."""
+    m = re.search(r"\.([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.db$", path, re.I)
+    return m.group(1).lower() if m else None
+
+
+def first_sign_in_after_install(db, armed, window_s=3600):
+    """True when the app was installed (its iOS Simulator container created) within window_s before
+    arming and nothing has signed out since: the first sign-in on a fresh install also loads the
+    app and its other solutions, so it is slower than the runs after it. None when unknown (Android)."""
+    m = re.match(r"(.*/Containers/Data/Application/[^/]+)/", db)
+    if db.startswith("adb:") or not m:
+        return None
+    try:
+        born = os.stat(m.group(1)).st_birthtime * 1000
+    except (OSError, AttributeError):
+        return None
+    if born < armed - window_s * 1000:
+        return False
+    try:
+        with connect(os.path.join(os.path.dirname(db), "jigx.log.db")) as conn:
+            signed_out = conn.execute("SELECT 1 FROM _logMessages WHERE timestamp < ? AND message LIKE '%igning out%' LIMIT 1",
+                                      (armed,)).fetchone()
+    except sqlite3.Error:
+        return None
+    return not signed_out
+
+
 def connect(path):
     """Read-only connection that closes on exit (sqlite3's own context manager only commits)."""
     if path.startswith("adb:"):
@@ -254,8 +282,10 @@ def read_state(path, tables):
     return {"scopes": scopes, "queue": queue, "counts": counts}
 
 
-def read_logs(path, after_id, since_ms):
-    """New WARNING/ERROR log lines from jigx.log.db; returns (rows, last id)."""
+def read_logs(path, after_id, since_ms, solution=None):
+    """New WARNING/ERROR log lines from jigx.log.db; returns (rows, last id). The log is shared by
+    every solution in the app: with `solution` (its id), lines another solution wrote are left out;
+    app-level lines carry no solutionId and are kept."""
     rows, last = [], after_id
     try:
         with connect(path) as conn:
@@ -266,6 +296,8 @@ def read_logs(path, after_id, since_ms):
                 try:
                     m = json.loads(message)
                 except ValueError:
+                    continue
+                if solution and m.get("solutionId") and str(m["solutionId"]).lower() != solution:
                     continue
                 row = {"at": iso(ts), "level": m.get("level"), "category": m.get("category"),
                        "message": redact(str(m.get("message", "")))[:300]}
@@ -537,16 +569,23 @@ def summarise(label, db, samples, result, armed, ready_at, logs, final, scopes):
     }
 
 
-def track(db, label, out, tables=(), scopes=(), interval=0.25, settle=5.0, timeout=900.0, stream=sys.stdout, unknown_wait=10.0):
+def samples_started(samples, scopes, armed):
+    """Whether any tracked scope started in this run."""
+    return any(status(x, scopes, armed) != "waiting" for x in samples)
+
+
+def track(db, label, out, tables=(), scopes=(), interval=0.25, settle=5.0, timeout=900.0, stream=sys.stdout, unknown_wait=10.0,
+          remind_after=180.0):
     os.makedirs(out, exist_ok=True)
     log_db = os.path.join(os.path.dirname(db), "jigx.log.db")
+    sol = solution_id(db)
     armed = now_ms()
     samples, logs, last_sig, last_log = [], [], None, 0
     # skip log lines written before arming
-    _, last_log = read_logs(log_db, 0, armed)
+    _, last_log = read_logs(log_db, 0, armed, sol)
     result, ready_since, ready_at, final = "timeout", None, None, None
     started_at, restarts, before_arming, idle_since, others_checked = armed, 0, set(), None, 0
-    announced, unknown_told, unknown_since = set(), set(), None
+    announced, unknown_told, unknown_since, reminded = set(), set(), None, 0
     inode = file_id(db)
     print(f"Tracking {solution_name(db)} as '{label}'. Start the load now: for a sign-in, sign out of the app and "
           "sign in again (every run needs a fresh sign-in); otherwise refresh or open the screen.",
@@ -560,7 +599,7 @@ def track(db, label, out, tables=(), scopes=(), interval=0.25, settle=5.0, timeo
                 time.sleep(interval)
                 continue
             final = state
-            new_logs, last_log = read_logs(log_db, last_log, armed)
+            new_logs, last_log = read_logs(log_db, last_log, armed, sol)
             recreated = file_id(db) != inode
             signed_out = any(SIGN_OUT.search(r["message"]) for r in new_logs)
             if signed_out or recreated:
@@ -597,6 +636,15 @@ def track(db, label, out, tables=(), scopes=(), interval=0.25, settle=5.0, timeo
             if st == "failed":
                 result = "failed"
                 break
+            if st == "waiting" and not restarts and not before_arming:
+                # Nothing started and no sign-out seen: the run is waiting for a sign-in that has not
+                # happened. Say so every few minutes instead of waiting out --timeout silently.
+                waited = (now_ms() - armed) / 1000
+                if waited >= remind_after * (reminded + 1):
+                    reminded += 1
+                    print(f"{t:7.2f}s  Nothing has started and no sign-out seen after {waited / 60:.0f} min: sign out of "
+                          f"{solution_name(db)} in the app and sign in again (each run needs a fresh sign-in), or Ctrl-C.",
+                          file=stream, flush=True)
             if st == "waiting":
                 pool = {s: state["scopes"].get(s) for s in scopes} if scopes else state["scopes"]
                 running = {s for s, v in pool.items() if v and v["state"] in ("syncing", "interrupted") and (v["startedAt"] or 0) < armed}
@@ -634,10 +682,15 @@ def track(db, label, out, tables=(), scopes=(), interval=0.25, settle=5.0, timeo
     summary = summarise(label, db, samples, result, armed, ready_at if result == "ready" else None, logs, final, scopes)
     summary["restarts"] = restarts
     summary["interval_s"] = interval
+    summary["other_solutions_synced"] = sorted(announced)
+    summary["first_sign_in_after_install"] = first_sign_in_after_install(db, armed)
+    if result == "timeout" and not samples_started(samples, scopes, armed):
+        summary["timeout_reason"] = "no sign-out seen and nothing started" if not restarts else "nothing started after the sign-out"
     with open(os.path.join(out, f"{label}-summary.json"), "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
     total = summary["first_start_to_ready_s"]
-    print("\n".join(["", f"{label}: {result}, first start to ready {'n/a' if total is None else f'{total}s'}", ""]
+    reason = f" ({summary['timeout_reason']})" if summary.get("timeout_reason") else ""
+    print("\n".join(["", f"{label}: {result}{reason}, first start to ready {'n/a' if total is None else f'{total}s'}", ""]
                     + waterfall(summary["entries"])), file=stream)
     print(f"Sync busy {summary['sync_busy_s']}s, {sum(summary['scope_starts'].values())} scope start(s)", file=stream)
     if summary["serial_entries"]:
@@ -652,6 +705,9 @@ def track(db, label, out, tables=(), scopes=(), interval=0.25, settle=5.0, timeo
               "onLoad that starts the same sync again", file=stream)
     if summary["snapshot_timeouts"]:
         print(f"Timeout for first snapshot: {summary['snapshot_timeouts']}", file=stream)
+    if summary["first_sign_in_after_install"]:
+        print("WARNING: the first sign-in after installing the app; it also loads the app and is usually slower. "
+              "Do not use it as a baseline run: run it again.", file=stream)
     if summary.get("hash_fallbacks"):
         print(f"Rows hashed for lack of an id: {summary['hash_fallbacks']}", file=stream)
     for e in summary.get("expression_errors", [])[:10]:

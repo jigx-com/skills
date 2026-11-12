@@ -566,3 +566,85 @@ class AndroidReadTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ProjectCentralRerunTest(unittest.TestCase):
+    """Peter's Project Central rerun (11 Nov 2026): a first-install baseline run, another solution's
+    log lines, and a run that waited 20 minutes for a sign-in that never came."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.folder = os.path.join(self.dir, "Containers", "Data", "Application", "APP-1", "Library", "LocalDatabase")
+        os.makedirs(self.folder)
+        self.sol = "8a00cc3c-6c1c-40ca-8439-81c9ead89754"
+        self.db = os.path.join(self.folder, f"jigx.solution.___project-central-dev___.{self.sol}.db")
+        conn = sqlite3.connect(self.db)
+        conn.execute("CREATE TABLE _syncScope (id TEXT PRIMARY KEY, state TEXT, details TEXT, lastStartedAt INTEGER, lastSyncedAt INTEGER)")
+        conn.execute("CREATE TABLE _commandQueue (id INTEGER PRIMARY KEY)")
+        conn.commit(); conn.close()
+        self.log = os.path.join(self.folder, "jigx.log.db")
+        log = sqlite3.connect(self.log)
+        log.execute("CREATE TABLE _logMessages (id INTEGER PRIMARY KEY, timestamp INTEGER, state TEXT, message TEXT)")
+        log.commit(); log.close()
+
+    def tearDown(self):
+        shutil.rmtree(self.dir)
+
+    def add_log(self, message, solution=None, at=None):
+        m = {"level": "WARNING", "category": "datastore", "message": message, **({"solutionId": solution} if solution else {})}
+        with contextlib_closing(sqlite3.connect(self.log)) as log:
+            log.execute("INSERT INTO _logMessages (timestamp, state, message) VALUES (?, 'read', ?)",
+                        (at or int(time.time() * 1000), json.dumps(m)))
+            log.commit()
+
+    def test_log_lines_of_another_solution_are_left_out(self):
+        self.assertEqual(tl.solution_id(self.db), self.sol)
+        self.add_log("#25 'settings' Timeout for first snapshot", "a99d1f92-7c6c-4252-9fcb-7243b8ad7fea")
+        self.add_log("#3 'photos' Timeout for first snapshot", self.sol)
+        self.add_log("app-level line, no solution")
+        rows, _ = tl.read_logs(self.log, 0, 0, tl.solution_id(self.db))
+        self.assertEqual([r["message"][:10] for r in rows], ["#3 'photos", "app-level "])
+        self.assertEqual(len(tl.read_logs(self.log, 0, 0)[0]), 3)
+
+    def test_a_silent_wait_reminds_and_says_why_it_timed_out(self):
+        out = io.StringIO()
+        s = tl.track(self.db, "post-2", os.path.join(self.dir, "runs"), interval=0.02, settle=0.1, timeout=0.5,
+                     stream=out, remind_after=0.15)
+        self.assertEqual(s["result"], "timeout")
+        self.assertEqual(s["timeout_reason"], "no sign-out seen and nothing started")
+        self.assertIn("Nothing has started and no sign-out seen", out.getvalue())
+        self.assertIn("post-2: timeout (no sign-out seen and nothing started)", out.getvalue())
+
+    def test_first_sign_in_after_install(self):
+        armed = int(time.time() * 1000) + 1000
+        self.assertTrue(tl.first_sign_in_after_install(self.db, armed))  # the container was just created
+        self.add_log("Signing out", at=armed - 500)
+        self.assertFalse(tl.first_sign_in_after_install(self.db, armed))  # a run after a sign-out
+        self.assertFalse(tl.first_sign_in_after_install(self.db, armed + 7200 * 1000))  # installed long before
+        self.assertIsNone(tl.first_sign_in_after_install("adb:emulator-5554:/data/x.db", armed))
+
+    def test_an_unusual_baseline_run_is_named_and_can_be_left_out(self):
+        pre = [dict(run("pre-1", 35.3, 5), first_sign_in_after_install=True, other_solutions_synced=["acumatica-lifeway-dev-peter"]),
+               run("pre-2", 12.1, 5), run("pre-3", 14.5, 5)]
+        post = [run("post-1", 6.9, 5), run("post-2", 7.6, 5), run("post-3", 10.5, 5)]
+        text = " ".join(cr.compare(pre, post)["warnings"])
+        self.assertIn("before run pre-1 is not like the others (the first sign-in after installing the app; "
+                      "acumatica-lifeway-dev-peter synced during it; 35.3s against 12.1, 14.5 for the others)", text)
+        self.assertIn("--exclude pre-1", text)
+        self.assertNotIn("post-", text)
+        folder = os.path.join(self.dir, "runs")
+        os.makedirs(folder, exist_ok=True)
+        for r in pre + post:
+            with open(os.path.join(folder, f"{r['label']}-summary.json"), "w") as f:
+                json.dump(r, f)
+        import contextlib as _c
+        with _c.redirect_stdout(io.StringIO()):
+            cr.main([folder, "--exclude", "pre-1"])
+        with open(os.path.join(folder, "comparison.json")) as f:
+            saved = json.load(f)
+        self.assertEqual(saved["before_runs"], ["pre-2", "pre-3"])
+        self.assertEqual(saved["rows"][0]["before_s"], 13.3)
+        self.assertIn("left out: pre-1", saved["warnings"])
+
+
+from contextlib import closing as contextlib_closing  # noqa: E402

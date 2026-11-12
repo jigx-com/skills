@@ -55,8 +55,12 @@ def git(folder):
     if branch == "HEAD":
         branch = "detached HEAD"
     dirty = [l for l in run(["git", "status", "--porcelain", "--", "."], folder).splitlines() if l.strip()]
-    return {"branch": branch, "commit": run(["git", "log", "-1", "--format=%h %s"], folder).strip()[:80],
-            "uncommitted": len(dirty)}
+    sha, _, subject = run(["git", "log", "-1", "--format=%h %s"], folder).strip().partition(" ")
+    # Shorten the subject at a word, never the hash or the branch: a cut inside "(base/project-centra"
+    # read like a broken branch name.
+    if len(subject) > 60:
+        subject = subject[:60].rsplit(" ", 1)[0].rstrip(",;:(") + " …"
+    return {"branch": branch, "commit": f"{sha} {subject}".strip(), "uncommitted": len(dirty)}
 
 
 def ios():

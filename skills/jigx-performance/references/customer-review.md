@@ -44,6 +44,11 @@ recommend what the repo allows:
   the repo allows it or the user asks: the checkout and its uncommitted changes stay as
   they are. `copy-to-test.py` finds the Builder settings (`.vscode/settings.json`, usually
   not committed) in the main checkout when it runs in a worktree.
+- **A copy in the review folder**, when the user wants nothing in the repo yet: keep the
+  baseline test copy (`copy-to-test.py --out <review>/test-before`) untouched for publishing
+  back, and make the fixes in a second copy (`--out <review>/test-after`, one git commit per
+  section inside that folder). The repo's own checks may refuse paths outside the repo:
+  `check-syntax.mjs` works on any folder. The user moves approved fixes into the repo later.
 
 After the checkout, install dependencies if the repo says so (e.g. `yarn install
 --frozen-lockfile`). Commit nothing until the user approves changes.
@@ -81,7 +86,8 @@ simulator, user and data for every run, before and after.
 
 ```sh
 python3 <skill-directory>/scripts/track-load.py --solution <test-solution> --wait --out <review>/runs --label pre-1 --scopes <scopes>
-# after the sync: a copy of the database the timings and the row-count check run on
+# after the sync, and after the screens' prepare steps (pick the project): a copy of the
+# database the timings and the row-count check run on
 python3 <skill-directory>/scripts/track-load.py --solution <test-solution> --copy-db <review>/before/device.db
 node <skill-directory>/scripts/time-queries.mjs <solution> --db <review>/before/device.db --scale 10 \
   --report <review>/before/timings.md > <review>/before/timings.json
@@ -95,28 +101,42 @@ python3 <skill-directory>/scripts/time-screens.py <review>/screens.json --platfo
   sign in again; repeat for `pre-2`, `pre-3`. Drive the simulator if a UI tool is
   available, otherwise tell the user each time to sign out and sign in while it runs.
   `--scopes` takes the sync actions' `instanceId`s (`sync-identity`), not the progress
-  datasources' names; the tracker lists the real ones when a name matches nothing.
+  datasources' names; the tracker lists the real ones when a name matches nothing. Do not
+  time the first sign-in after installing the app (it also loads the app and any other
+  solution): the tracker marks it, `compare-runs.py` names it and any run over twice the
+  others, and `--exclude <label>` leaves it out. Log lines other solutions write are not
+  counted.
 - **Queries and actions** run on a copy of the test user's database after the sync, so
   they see real row counts. `--scale 10` repeats every timing on a copy with ten times
   the rows (keys that link tables kept apart per copy) and lists what grows faster than
   the data: a test user's small data set hides those, and they are the ones that get slow
   for a big customer. Read each one's plan with `profile-query.py` before proposing a fix.
-  Parameters are sampled from the column the query compares them with, else guessed from
-  a column with the same name (the value with the most rows: the busiest project); the
-  report lists every guess. Check them, and pin others with `--params params.json`. Always
-  run it on a `--copy-db` copy: a plain `cp` leaves the rows in the `-wal` file, and an
-  empty database stops the run. A phone is several times slower than the host: rank by
+  Parameters that read solution state (the active project) get one value in every query:
+  the one with the most rows across the columns they are compared with, padding kept;
+  other parameters are sampled from the column the query compares them with, else
+  guessed from a column with the same name. The report lists them all; pin one with
+  `--params params.json` (`{"active-project": "BUDGETBYM "}` sets every parameter that
+  reads that state). Always run it on a `--copy-db` copy: a plain `cp` leaves the rows in
+  the `-wal` file, and an empty database stops the run. Take the copy after the screens'
+  prepare steps: tables that sync only once a project is picked are otherwise empty, and
+  the report lists the queries that read only empty tables as not measured. A phone is several times slower than the host: rank by
   these numbers, do not quote them as device time.
 - **Screens**: write `<review>/screens.json` once (format in `time-screens.py`):
   for each screen the tap that opens it and a text or id that is only visible once its
   data has loaded (a row number, not the title). Read the screen's YAML or TS for the
-  ids, then confirm them on the simulator with `time-screens.py --ids`, which prints the
-  ids and texts on the current screen. Navigate by id, never by screen coordinates.
+  ids, then confirm them on the simulator with `time-screens.py <review>/screens.json --ids
+  --at <screen>`: it runs the prepare steps and that screen's setup and tap, then prints the
+  ids and texts of the screen it opened (`--tap <text|id:ID>` adds taps). Navigate by id,
+  never by screen coordinates.
   - **The time covers what renders before the ready element.** A row's number times the
     list; to time a per-row fix, pick what the fix changes (a row's photo count or
     status), or the change cannot show. The report names each screen's ready element.
   - **State the screens need goes in `prepare`**: steps run once before the round, e.g.
-    picking the project the project screens show (a sign-in clears it).
+    picking the project the project screens show (a sign-in clears it):
+    `"prepare": [{"tap": {"id": "tab-bar.1-projects"}}, {"wait": {"id": "project.BUDGETBYM"}}, {"tap": {"id": "project.BUDGETBYM"}}]`.
+  - **A cold start** (`"start": "cold"`) on iOS also records the warnings and errors the
+    app logs during each run (a gate still blocking, expression errors): with no sync
+    running, they are what the time was spent on. The report lists them per screen.
   - **A control screen** (a static screen inside the solution; its time is Maestro's
     overhead) is optional. Never the More tab or the solution switcher: on a simulator
     that also holds production solutions, one wrong tap switches solution.
@@ -176,12 +196,14 @@ For each approved section, in order:
 - add a `check-plans.py` guard for each per-row or per-change lookup you fixed
 - append each change to `<review>/changes.json` as
   `{"section": "B", "change": "Index orders by reference", "files": ["actions/create-indexes.jigx"]}`
-- check it still loads, and stop and report if it does not. First the repo's own checks on
-  the changed files, when it has them (its README lists them, e.g. `yarn validate
-  <file.jigx>` and `yarn cc:changed --base <base>` in jigx-com/acumatica). SDK: `jigx build`,
-  then the `jigx` runtime checker (`check-runtime.mjs` reads `build/output.json` only). YAML
-  has no build: run the audit again and check it reports no `parseErrors`, and parse every
-  expression you changed with jsonata (each `=` value must parse)
+- check it still loads, after every section and before publishing, and stop and report if
+  it does not. YAML: `node <skill-directory>/scripts/check-syntax.mjs <solution> <changed
+  files>` parses each file and every `=` expression in it with JSONata (any folder, also a
+  copy in the review folder; a ` : ` in a plain YAML value, such as a ternary in `when:`,
+  is a YAML error it names). Then the repo's own checks on the changed files, when it has
+  them (its README lists them, e.g. `yarn validate <file.jigx>` and `yarn cc:changed --base
+  <base>` in jigx-com/acumatica; install first if they need it). SDK: `jigx build`, then the
+  `jigx` runtime checker (`check-runtime.mjs` reads `build/output.json` only)
 
 Then audit again, publish to the same test solution and repeat every timing from step 2
 with the same journeys, data and simulator:

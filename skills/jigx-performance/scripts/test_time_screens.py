@@ -167,6 +167,46 @@ class TimeScreensTest(unittest.TestCase):
         self.assertEqual(len(calls), 2)  # --version, then the prepare flow; no warm-up, no screen
         self.assertFalse(os.path.exists(os.path.join(d, "pre.json")))
 
+    def test_ids_can_follow_prepare_a_screen_path_and_taps(self):
+        # Project Central: a sign-in clears the active project, so ids are only on screen after picking one.
+        spec = {"appId": "com.jigx.app", "prepare": [{"tap": {"id": "project.BUDGETBYM"}}],
+                "screens": [{"name": "photo-logs", "setup": [{"tap": "Photos"}], "tap": {"text": "Log \\d+", "index": 0}, "ready": "x"}]}
+        lines = ts.path_flow("com.jigx.app", spec, "ios", at="photo-logs", taps=["id:photo-log.camera", "Save"]).splitlines()
+        order = [lines.index('- tapOn: {"id": "project.BUDGETBYM"}'), lines.index('- tapOn: "Photos"'),
+                 lines.index('- tapOn: {"text": "Log \\\\d+", "index": 0}'), lines.index('- tapOn: {"id": "photo-log.camera"}'),
+                 lines.index('- tapOn: "Save"')]
+        self.assertEqual(order, sorted(order))
+        self.assertEqual(lines[-2], "- waitForAnimationToEnd:")
+        self.assertNotIn("evalScript", "\n".join(lines))  # nothing is timed
+        with self.assertRaises(ValueError):
+            ts.path_flow("com.jigx.app", spec, at="nope")
+
+    def test_cold_start_reads_the_runtime_log(self):
+        # Project Central: a 20 s cold start with no sync; the log said why (a gate, expression errors).
+        import json, sqlite3, tempfile
+        d = tempfile.mkdtemp()
+        path = os.path.join(d, "jigx.log.db")
+        conn = sqlite3.connect(path)
+        conn.execute("CREATE TABLE _logMessages (id INTEGER PRIMARY KEY, timestamp INTEGER, state TEXT, message TEXT)")
+        rows = [(1000, {"level": "INFO", "message": "started"}),
+                (2000, {"level": "WARNING", "message": "Gate is still blocking after 18.5 s"}),
+                (3000, {"level": "ERROR", "message": "Failed with error: Bearer abc.def T0410"}),
+                (9000, {"level": "ERROR", "message": "after the run"})]
+        for at, m in rows:
+            conn.execute("INSERT INTO _logMessages (timestamp, state, message) VALUES (?, 'read', ?)", (at, json.dumps(m)))
+        conn.commit(); conn.close()
+        lines = ts.log_lines(path, 1500, 5000)
+        self.assertEqual([x["level"] for x in lines], ["WARNING", "ERROR"])
+        self.assertNotIn("abc.def", json.dumps(lines))
+        res = {"label": "pre", "device": "d", "appId": "a", "maestro": "2", "runs": 2,
+               "screens": ts.summarise({"cold-start": [{"run": 1, "ms": 20720, "log": lines}, {"run": 2, "ms": 19260, "log": lines[:1]}]},
+                                       [{"name": "cold-start", "start": "cold", "ready": "Photos"}])}
+        text = ts.report(res)
+        self.assertIn("## Runtime log during cold-start", text)
+        self.assertIn("Errors per run: 1, 0; warnings per run: 1, 1", text)
+        self.assertIn("- WARNING x2: Gate is still blocking after 18.5 s", text)
+        self.assertEqual(ts.log_lines(None, 0, 1), [])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -46,7 +46,8 @@ runs to that). Every tap waits up to 30 s for its element first, so a tab hidden
 `onFocus` sync runs (a `when:` on the tab) no longer fails the run. Top-level `prepare`
 steps run once before the round, for state the screens need (the project to show, which a
 sign-in clears). Ids that work in Jigx apps (`time-screens.py --ids` prints the ids and
-texts on the current screen):
+texts on the current screen; with the spec it runs `prepare` first, and `--at <screen>` follows
+that screen's setup and tap, so one call lists the ids of the screen to time):
 
 | Element | Id |
 |---|---|
@@ -142,7 +143,13 @@ use.
    - It prints a line per change, stops when every tracked scope is synced and
      `_commandQueue` is empty for `--settle` seconds (or on a failed entry, or
      `--timeout`), then prints a waterfall and writes `<review>/runs/<label>-summary.json`
-     and `-samples.jsonl`.
+     and `-samples.jsonl`. While nothing has started and no sign-out was seen it says so
+     every 3 minutes, and a run that times out that way says "no sign-out seen".
+   - The runtime log is shared by every solution in the app: lines another solution wrote
+     (its snapshot timeouts, its errors) are left out. The first sign-in after installing
+     the app is marked (`first_sign_in_after_install`), as is a run during which another
+     solution synced; `compare-runs.py` names those and any run over twice the others on
+     its side, and `--exclude <label>` leaves one out. Run it again rather than keep it.
    - Time from the first scope start, not from arming: the wait before it includes the
      user typing credentials.
    - **Acumatica OAuth sign-in** interrupts the identity sync while the login page waits;

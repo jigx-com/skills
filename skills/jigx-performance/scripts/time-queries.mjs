@@ -15,7 +15,10 @@
 // a per-copy suffix, so each copy joins to its own rows instead of multiplying the joins;
 // values the solution's SQL compares with literally ('In Process', 1) are kept.
 //
-// params.json binds query parameters by name ({"appointmentId": "AP001"}). A parameter it does
+// params.json binds query parameters by name ({"appointmentId": "AP001"}), or every parameter that
+// reads one solution-state value by the state's name ({"active-project": "BUDGETBYM "}). Without
+// it, a state value gets one value for every query that reads it: the one with the most rows
+// across the columns they compare it with, as stored (padding kept). Any other parameter it does
 // not give is sampled from the column the query compares it with; failing that, it is guessed
 // from a column with the same name (projectId -> ProjectID), taking the value with the most rows
 // (the busiest project), and the report lists every guess. The rest are NULL, which makes most
@@ -303,8 +306,52 @@ export function guessParam(db, name, keys = dataKeys(db), tables = []) {
   return best;
 }
 
+// The solution state a parameter reads on its own: `=@ctx.solution.state.active-project` -> 'active-project'.
+export const stateKey = v => /^=?\s*@ctx\.solution\.state\.([\w-]+)\s*$/.exec(String(v ?? '').trim())?.[1];
+
+// One value per solution-state key, for every parameter that reads it: the value given in
+// params.json (by the state's name, "active-project", or "@ctx.solution.state.active-project"),
+// else the value with the most rows across the columns those queries compare it with (the busiest
+// project). Values are used as stored: Acumatica pads some keys ("BUDGETBYM ").
+export function stateValues(db, queries, params = {}) {
+  const uses = new Map();
+  for (const q of queries) for (const [name, v] of Object.entries(q.parameters ?? {})) {
+    const key = stateKey(v);
+    if (key && !(name in params)) (uses.get(key) ?? uses.set(key, []).get(key)).push({sql: q.sql, name});
+  }
+  const out = {};
+  for (const [key, list] of uses) {
+    const given = [`@ctx.solution.state.${key}`, `state.${key}`, key].find(k => k in params);
+    if (given) { out[key] = {value: params[given], given: true, queries: list.length}; continue; }
+    const tally = new Map(), from = new Set();
+    for (const probe of new Set(list.map(u => sampleQueries(u.sql)[u.name]).filter(Boolean))) {
+      const count = probe.replace(/ AS v FROM /, ' AS v, count(*) AS n FROM ').replace(/ LIMIT 1$/, ' GROUP BY v');
+      try {
+        for (const r of db.prepare(count).all()) {
+          const k = JSON.stringify(r.v);
+          tally.set(k, (tally.get(k) ?? 0) + r.n);
+          from.add(/\bFROM\s+(\[[^\]]+\]|\S+)/.exec(probe)?.[1]?.replace(/^\[|\]$/g, ''));
+        }
+      } catch { /* table not on this device */ }
+    }
+    const best = [...tally].sort((a, b) => b[1] - a[1])[0];
+    out[key] = best ? {value: JSON.parse(best[0]), rows: best[1], from: [...from].filter(Boolean).sort(), queries: list.length}
+      : {value: null, none: true, queries: list.length};
+  }
+  return out;
+}
+
 export function timeSolution(app, db, {params = {}, runs = 5, sources = {}} = {}) {
   const {queries, indexes, steps, built} = collect(app);
+  const state = stateValues(db, queries, params);
+  const stateOf = new Map(queries.map(q => [q.sql, Object.fromEntries(Object.entries(q.parameters ?? {})
+    .map(([n, v]) => [n, stateKey(v)]).filter(([n, k]) => k && !(n in params) && !state[k]?.none))]));
+  const fromState = (sql, n) => { const k = stateOf.get(sql)?.[n]; return k ? state[k].value : undefined; };
+  // Tables with no rows on this copy: a query that reads only those timed nothing.
+  const tableRows = new Map(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all()
+    .map(({name}) => { try { return [name.toLowerCase(), db.prepare(`SELECT count(*) AS n FROM "${name.replace(/"/g, '""')}"`).get().n]; } catch { return [name.toLowerCase(), null]; } }));
+  const emptyTables = sql => { const ts = queryTables(sql).map(t => t.toLowerCase()).filter(t => tableRows.has(t));
+    return ts.length && ts.every(t => tableRows.get(t) === 0) ? ts : null; };
   let keys = null;
   const guessed = new Map();
   const used = new Set();
@@ -321,7 +368,7 @@ export function timeSolution(app, db, {params = {}, runs = 5, sources = {}} = {}
     if (!sampled.has(sql)) {
       const values = {};
       for (const [name, probe] of Object.entries(sampleQueries(sql))) {
-        if (name in params) continue;
+        if (name in params || fromState(sql, name) !== undefined) continue;
         try { const v = db.prepare(probe).get()?.v; if (v != null) values[name] = v; } catch { /* table not on this device */ }
       }
       sampled.set(sql, values);
@@ -331,8 +378,8 @@ export function timeSolution(app, db, {params = {}, runs = 5, sources = {}} = {}
   // Unbound parameters are NULL first: an optional filter (@p IS NULL OR ...) then shows every row,
   // as the screen does. Only a query that returns nothing with NULL is tried with guessed values.
   const bind = (sql, guessing = false) => { const s = sample(sql); return Object.fromEntries(paramNames(sql).map(n =>
-    [n, params[n] ?? s[n] ?? (guessing ? guess(n, sql)?.value : null) ?? null])); };
-  const open = sql => paramNames(sql).filter(n => !(n in params) && !(n in sample(sql)));
+    [n, params[n] ?? fromState(sql, n) ?? s[n] ?? (guessing ? guess(n, sql)?.value : null) ?? null])); };
+  const open = sql => paramNames(sql).filter(n => !(n in params) && fromState(sql, n) === undefined && !(n in sample(sql)));
   const unbound = sql => open(sql);
   const loc = p => where(p, sources);
   const existing = new Set(db.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all().map(r => r.name));
@@ -347,7 +394,9 @@ export function timeSolution(app, db, {params = {}, runs = 5, sources = {}} = {}
 
   const queryResults = queries.map(q => {
     const base = {where: loc(q.path), copies: q.copies, sampled: Object.keys(sample(q.sql)).filter(n => !(n in params)),
-      unbound: unbound(q.sql)};
+      unbound: unbound(q.sql), ...(Object.keys(stateOf.get(q.sql) ?? {}).length && {state: stateOf.get(q.sql)})};
+    const empty = emptyTables(q.sql);
+    if (empty) base.emptyTables = empty;
     try {
       const stmt = db.prepare(q.sql);
       let timed = time(() => stmt.all(bind(q.sql)), runs);
@@ -387,7 +436,7 @@ export function timeSolution(app, db, {params = {}, runs = 5, sources = {}} = {}
     const k = `${g.name}=${JSON.stringify(g.value)}`;
     guesses[k] ??= {name: g.name, value: g.value, from: g.from, rows: g.rows};
   }
-  return {indexes: indexResults, queries: queryResults, actions: stepResults, notTimed: [...new Set(built)].map(loc), guesses};
+  return {indexes: indexResults, queries: queryResults, actions: stepResults, notTimed: [...new Set(built)].map(loc), guesses, state};
 }
 
 // Change per item against an earlier run, matched by kind and location.
@@ -401,6 +450,10 @@ export function compareTimings(before, after) {
       const change = b.ms ? round((r.ms - b.ms) / b.ms * 100) : null;
       if (b.nullParams || r.nullParams) {
         rows.push({kind, where: r.where, before_ms: b.ms, after_ms: r.ms, change_pct: change, verdict: 'not measured (NULL parameters)'});
+        continue;
+      }
+      if (b.emptyTables || r.emptyTables) {
+        rows.push({kind, where: r.where, before_ms: b.ms, after_ms: r.ms, change_pct: change, verdict: 'not measured (empty tables)'});
         continue;
       }
       // A host repeats a small query within about a millisecond, so a move counts when it is
@@ -438,6 +491,20 @@ export function timingsReport({title, result, comparison, comparisonScaled, meta
     'screens use; pin others with --params params.json ({"name": "value"}).', '',
     ...guesses.slice(0, 25).map(g => `- @${g.name} = ${JSON.stringify(g.value)} (from ${g.from}, ${g.rows} rows)`),
     ...(guesses.length > 25 ? [`- … ${guesses.length - 25} more in the JSON output (\`guesses\`)`] : []), '');
+  const states = Object.entries(result.state ?? {});
+  if (states.length) lines.push(`## Solution state (${states.length})`, '',
+    'Parameters that read one solution-state value (the active project) get one value in every query: the value with the most ' +
+    'rows across the columns those queries compare it with, used as stored (padding kept). Pin it with --params ' +
+    'params.json ({"<state name>": "value"}).', '',
+    ...states.map(([k, v]) => `- ${k} = ${v.none ? 'none found (the compared tables are empty)' : JSON.stringify(v.value)}` +
+      (v.given ? ' (from --params)' : v.none ? '' : ` (${v.rows} rows in ${v.from.join(', ')})`) + `, for ${v.queries} quer${v.queries === 1 ? 'y' : 'ies'}`), '');
+  const empties = result.queries.filter(q => q.emptyTables && !q.nullParams);
+  const emptyRead = [...new Set(result.queries.filter(q => q.emptyTables).flatMap(q => q.emptyTables))].sort();
+  if (emptyRead.length) lines.push(`## Empty tables: not measured (${result.queries.filter(q => q.emptyTables).length} queries)`, '',
+    `These tables have no rows in this copy: ${emptyRead.join(', ')}. Queries that read only them timed nothing, and a fix to ` +
+    'them cannot be timed or checked. Often they sync only after a screen opens (pick a project): open those screens ' +
+    '(the screen spec\'s prepare steps), then take the copy again with track-load.py --copy-db.', '',
+    ...empties.slice(0, 15).map(q => `- \`${q.where}\``), ...(empties.length > 15 ? [`- … ${empties.length - 15} more`] : []), '');
   const nulls = result.queries.filter(q => q.nullParams);
   if (nulls.length) lines.push(`## No rows on NULL or guessed parameters: not measured (${nulls.length})`, '',
     'These queries compare a value the screen supplies (a barcode, a search box, a selected record) and returned no rows ' +
@@ -474,7 +541,8 @@ export function timingsReport({title, result, comparison, comparisonScaled, meta
     for (const r of rows) lines.push(`| ${cols.map(c => c[1](r)).join(' | ')} |`);
     lines.push('');
   };
-  const note = r => r.error ? `error: ${r.error}` : [r.sampled?.length && `sampled: ${r.sampled.join(', ')}`,
+  const note = r => r.error ? `error: ${r.error}` : [r.state && `state: ${Object.entries(r.state).map(([n, k]) => n === k ? n : `${n}=${k}`).join(', ')}`,
+    r.emptyTables && 'empty tables', r.sampled?.length && `sampled: ${r.sampled.join(', ')}`,
     r.guessed?.length && `guessed: ${r.guessed.join(', ')}`,
     r.unbound?.length && `NULL: ${r.unbound.join(', ')}`, r.note].filter(Boolean).join('; ');
   table('Slowest queries', result.queries.filter(q => q.ms != null).slice(0, 25), [
@@ -494,7 +562,7 @@ export function timingsReport({title, result, comparison, comparisonScaled, meta
     ...result.notTimed.slice(0, 20).map(w => `- \`${w}\``), '');
   lines.push('## Not measured here', '',
     '- Sync and network time: `track-load.py`. Screen open time, which includes expression evaluation and rendering: `time-screens.py`.',
-    '- Parameters: given in --params, else "sampled" (one real value of the column the query compares them to), else "guessed" (the most frequent value of a same-named column), else NULL. A NULL parameter usually returns no rows, so that query\'s time is a lower bound.');
+    '- Parameters: given in --params, else the solution state they read (one value for every query), else "sampled" (one real value of the column the query compares them to), else "guessed" (the most frequent value of a same-named column), else NULL. A NULL parameter usually returns no rows, so that query\'s time is a lower bound.');
   return lines.join('\n') + '\n';
 }
 

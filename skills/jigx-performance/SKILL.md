@@ -33,9 +33,11 @@ user-facing guide: every audit rule with its priority, and every script's flags.
   The code check and timing are read-only. Before the first fix, ask once where the fixes
   go and recommend what the repo's rules allow: a new branch from the checked-out one in
   this checkout (`git switch -c <name>`, named the repo's way, e.g. `perf/CU-<ticket>-<what>`;
-  stop if unrelated uncommitted changes would come along), or a separate worktree
-  (`git worktree add`) when the repo allows it or the user asks. Then install
-  dependencies if the repo says so after a checkout (e.g. `yarn install --frozen-lockfile`).
+  stop if unrelated uncommitted changes would come along), a separate worktree
+  (`git worktree add`) when the repo allows it or the user asks, or a copy in the review
+  folder next to the test copy that is published (nothing in the repo changes; the
+  baseline copy stays untouched). Then install dependencies if the repo says so after a
+  checkout (e.g. `yarn install --frozen-lockfile`).
 - **Write outputs to the review folder** that `preflight.py` prints,
   `~/jigx-perf-reviews/<solution>/<branch>/` (`<review>` below), never into the repo.
 - **SDK projects:** run `jigx build` first when `build/output.json` is missing or older
