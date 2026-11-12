@@ -21,6 +21,8 @@ test('Jigx @ctx and @. read as a variable for the parser', () => {
   // a hyphenated name is one name in Jigx (chkYes-3, big-list-10k), a subtraction in JSONata
   assert.equal(forParser('@ctx.components.chkYes-3.state.value'), '$ctx.components.`chkYes-3`.state.value');
   assert.equal(forParser('$count(@ctx.datasources.big-list-10k) - 1'), '$count($ctx.datasources.`big-list-10k`) - 1');
+  assert.equal(forParser('@ctx.inputs.1position-team-avatar'), '$ctx.inputs.`1position-team-avatar`');
+  assert.equal(forParser('@ctx.inputs.list[0].name'), '$ctx.inputs.list[0].name');
 });
 
 test('a " : " in a plain YAML value is a YAML error in that file (Project Central, a ternary in when:)', () => {

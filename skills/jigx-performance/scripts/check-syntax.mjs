@@ -40,11 +40,11 @@ export function findJsonata(folder, given) {
 }
 
 // Jigx's @ctx and @. become a variable so the JSONata parser accepts them, and a name with a
-// hyphen in a context path (@ctx.components.chkYes-3, @ctx.datasources.big-list-10k) is quoted:
-// Jigx reads it as one name, JSONata as a subtraction.
+// hyphen or a leading digit in a context path (@ctx.components.chkYes-3, @ctx.inputs.1position)
+// is quoted: Jigx reads it as one name, JSONata as a subtraction or a number.
 export const forParser = expr => expr.replace(/@ctx\b/g, '$ctx').replace(/(^|[^\w$])@\./g, '$1$ctx.')
-  .replace(/\$ctx((?:\.[A-Za-z_$][\w$]*(?:-[\w$]+)*)+)/g, (_, path) =>
-    '$ctx' + path.split('.').map(seg => seg.includes('-') ? '`' + seg + '`' : seg).join('.'));
+  .replace(/\$ctx((?:\.[\w$]+(?:-[\w$]+)*)+)/g, (_, path) =>
+    '$ctx' + path.split('.').map(seg => /-|^\d/.test(seg) ? '`' + seg + '`' : seg).join('.'));
 
 export function checkSyntax(folder, {files = [], jsonata = null} = {}) {
   const {app, sources, parseErrors} = loadSolution(folder);
