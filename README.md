@@ -97,8 +97,8 @@ tabs, media, PDFs, local data, validation, generated YAML, and build/deploy work
 
 Use `jigx-acumatica` together with `jigx` when the app integrates with Acumatica:
 REST/OData functions, `acuerp` tokens, `acumaticaURL` casing, lookup expands,
-local-first sync, command queue retry, file upload, PDF attachment, and service order
-submission patterns.
+local-first sync, command queue retry, file upload, PDF attachment, service order
+submission patterns, and the read-only probe of a customer's test environment.
 
 ## Verify generated solutions
 
@@ -114,6 +114,15 @@ The checker exits nonzero on errors and reports warnings separately. It catches
 undeclared state, hidden action groups, SQL binding mistakes, and local REST
 context/pagination errors. It does not validate live business data or prove that
 a device submission succeeded.
+
+The Acumatica skill includes a read-only probe of a customer's test environment
+(`skills/jigx-acumatica/scripts/probe/`). The owner runs it with their own
+credentials; it sends only GETs plus login and logout, and stops after one failed
+login. Its self-test runs against a local fake instance:
+
+```sh
+node skills/jigx-acumatica/scripts/probe/selftest.mjs
+```
 
 For Acumatica integrations, combine the
 [screen KB and its companion skill](https://github.com/jigx-com/acumatica-kb-mcp)

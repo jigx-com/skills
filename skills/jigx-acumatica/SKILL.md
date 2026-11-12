@@ -1,6 +1,6 @@
 ---
 name: jigx-acumatica
-description: Use when building Jigx apps that integrate with Acumatica ERP, including probing an instance, using SOAP/UI probes to understand screens, choosing between generic inquiries and contract REST for mobile, reading a screen's built-in logic and reconciling it with the customer's instance, selector and cascade rules, on-demand and delta reads, custom endpoint creation, REST and OData functions, Acumatica config values, acuerp access tokens, .value payload wrappers, lookup sync, expand selection, local-first sync, command queue retry, file uploads, PDF attachment, and service order submission.
+description: Use when building Jigx apps that integrate with Acumatica ERP, including probing an instance, running a read-only probe of a customer's test environment to list what its admin must change (endpoints, entities, fields, generic inquiries, access rights per company), using SOAP/UI probes to understand screens, choosing between generic inquiries and contract REST for mobile, reading a screen's built-in logic and reconciling it with the customer's instance, selector and cascade rules, on-demand and delta reads, custom endpoint creation, REST and OData functions, Acumatica config values, acuerp access tokens, .value payload wrappers, lookup sync, expand selection, local-first sync, command queue retry, file uploads, PDF attachment, and service order submission.
 ---
 
 # Jigx Acumatica
@@ -18,22 +18,26 @@ Acumatica-specific integration rules.
    Acumatica configuration only; Jigx mobile cannot execute SOAP calls and must use
    the discovered screen facts through Generic Inquiries/OData, contract REST, or an
    explicitly provided server-side bridge.
-3. Before designing anything on a screen, read `references/acumatica-screen-logic.md`
+3. To check a customer's instance against what a solution needs, or to list what the
+   customer's admin must change, read `references/acumatica-probe.md`. The owner runs
+   `scripts/probe/probe.mjs` with their own credentials; the agent drafts the manifest
+   and reads the report.
+4. Before designing anything on a screen, read `references/acumatica-screen-logic.md`
    and use `jigx-acumatica-kb`. Reconcile with the live instance when a connection
    exists, and treat customer-added and unresolved fields as schema only.
-4. Confirm whether the task is inbound lookup sync, local-first outbound sync, direct
+5. Confirm whether the task is inbound lookup sync, local-first outbound sync, direct
    submit, file upload, or retry/error handling. For any offline/batch create or
    update, read `references/acumatica-sync.md` before designing tables or actions.
-5. Confirm REST versus OData. Prefer REST when possible.
-6. Confirm required `$expand` values before implementing lookups that need nested data.
-7. Keep Acumatica config casing exact: `acumaticaURL` and `acumaticaOdataURL`.
-8. Use `accessToken` with type/value `acuerp`; do not hardcode access tokens.
-9. Preserve local-first behavior unless the app explicitly uses direct submit.
-10. For every selector and every write, read `references/acumatica-selectors-and-cascades.md`
+6. Confirm REST versus OData. Prefer REST when possible.
+7. Confirm required `$expand` values before implementing lookups that need nested data.
+8. Keep Acumatica config casing exact: `acumaticaURL` and `acumaticaOdataURL`.
+9. Use `accessToken` with type/value `acuerp`; do not hardcode access tokens.
+10. Preserve local-first behavior unless the app explicitly uses direct submit.
+11. For every selector and every write, read `references/acumatica-selectors-and-cascades.md`
     and `references/integration-verification.md`. Resolve runtime-only selectors on
     the instance, round-trip lookup values through the writable endpoint, and run
     the hardening gauntlet before calling a write done.
-11. Declare every list read per `references/acumatica-reads-and-sync-contract.md`:
+12. Declare every list read per `references/acumatica-reads-and-sync-contract.md`:
     inquiry-backed, delta by a modified field, row identity for join rows, and a
     required parameter for any read that needs an address or a parent.
 
@@ -43,6 +47,10 @@ Acumatica-specific integration rules.
 - `references/acumatica-discovery.md` - probing an instance, SOAP/UI probe boundaries
   for Jigx mobile, the three channels by job, release from build, session and licence
   discipline, reading Acumatica errors.
+- `references/acumatica-probe.md` - the read-only probe of a customer's test
+  environment: hard rules, workflow, scripts, admin list.
+- `references/acumatica-probe-manifest.md` - the probe manifest format.
+- `references/acumatica-probe-results.md` - what each probe result means and who acts.
 - `references/acumatica-screen-logic.md` - what the screen knowledge base carries,
   the release rule, reconciling with the live instance, provenance, what it cannot know.
 - `references/acumatica-selectors-and-cascades.md` - the stored-column contract,
@@ -65,6 +73,8 @@ Acumatica-specific integration rules.
 
 ## Guardrails
 
+- Never run the Acumatica probe with credentials yourself, look for credentials, or
+  add a non-GET request to it. The owner runs it; reports stay local.
 - Never guess or default the Acumatica release. Derive it from the build or ask; a
   release the knowledge base does not cover is designed from the live schema, never
   from a neighbouring release.

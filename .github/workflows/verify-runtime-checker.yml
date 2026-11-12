@@ -14,3 +14,4 @@ jobs:
         with:
           node-version: 22
       - run: node --test skills/jigx/scripts/check-runtime.test.mjs
+      - run: node skills/jigx-acumatica/scripts/probe/selftest.mjs
