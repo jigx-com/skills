@@ -18,6 +18,9 @@ const found = findJsonata(process.cwd());
 test('Jigx @ctx and @. read as a variable for the parser', () => {
   assert.equal(forParser('$count(@ctx.datasources.x) > 0 and @.user.email'), '$count($ctx.datasources.x) > 0 and $ctx.user.email');
   assert.equal(forParser('"a@b.c"'), '"a@b.c"');
+  // a hyphenated name is one name in Jigx (chkYes-3, big-list-10k), a subtraction in JSONata
+  assert.equal(forParser('@ctx.components.chkYes-3.state.value'), '$ctx.components.`chkYes-3`.state.value');
+  assert.equal(forParser('$count(@ctx.datasources.big-list-10k) - 1'), '$count($ctx.datasources.`big-list-10k`) - 1');
 });
 
 test('a " : " in a plain YAML value is a YAML error in that file (Project Central, a ternary in when:)', () => {

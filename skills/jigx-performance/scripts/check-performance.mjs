@@ -656,12 +656,19 @@ export function checkPerformance(app, {stats = null, sources = {}} = {}) {
   for (const {path, node} of datasources) {
     const query = node.options.query;
     const rows = Math.max(0, ...asArray(node.options.entities).map(e => stats?.[tableName(typeof e === 'string' ? e : e?.entity)]?.rows ?? 0));
-    for (const o of orAcrossKeys(query)) {
+    // One finding per query: a queue query with eleven OR lookups is one thing to fix, not eleven.
+    const ors = orAcrossKeys(query).map(o => ({...o, missing: o.keys.filter(k => !/^(\w+\.)?id$/i.test(k) && !indexed.has(k))}))
+      .filter(o => o.missing.length);
+    if (ors.length) {
       // With an index on every arm SQLite can use one index per arm; any unindexed arm makes it scan.
-      const missing = o.keys.filter(k => !/^(\w+\.)?id$/i.test(k) && !indexed.has(k));
-      if (missing.length) add('or-across-keys', `${path}.options.query`,
-        `OR across ${o.keys.join(', ')}${o.perRow ? ', evaluated per row (JOIN ON or a correlated subquery)' : ''}; no index on ${missing.join(', ')}, so SQLite scans.`,
-        {priority: o.perRow || rows >= 1000 ? 'high' : 'medium'});
+      const perRow = ors.some(o => o.perRow);
+      const missing = [...new Set(ors.flatMap(o => o.missing))];
+      const first = ors[0];
+      add('or-across-keys', `${path}.options.query`,
+        (ors.length > 1 ? `${ors.length} OR lookups across keys, e.g. ` : 'OR across ') +
+        `${first.keys.join(', ')}${perRow ? ', evaluated per row (JOIN ON or a correlated subquery)' : ''}; ` +
+        `no index on ${missing.slice(0, 4).join(', ')}${missing.length > 4 ? ` and ${missing.length - 4} more` : ''}, so SQLite scans.`,
+        {priority: perRow || rows >= 1000 ? 'high' : 'medium'});
     }
     for (const c of cteJoins(query))
       add('cte-join-no-index', `${path}.options.query`,
@@ -733,7 +740,9 @@ export function checkPerformance(app, {stats = null, sources = {}} = {}) {
       if (v.type === 'action.sync-entities') {
         const list = asArray(v.options?.entities);
         out.entities += Math.max(1, list.length);
-        for (const e of list) out.tables.push(String(typeof e === 'string' ? e : e?.entity ?? e?.name ?? '?').replace(/^default\//, ''));
+        // Entities built by an expression ($map over files) are a list of unknown length.
+        if (!Array.isArray(v.options?.entities) && typeof v.options?.entities === 'string') out.built = true;
+        for (const e of list) out.tables.push(String(typeof e === 'string' && !/^\s*=/.test(e) ? e : e?.entity ?? e?.name ?? '(built by an expression)').replace(/^default\//, ''));
         if (owner) out.syncers.add(owner); // the action that syncs, not a wrapper or a logout next to it
         return false;
       }
@@ -759,13 +768,17 @@ export function checkPerformance(app, {stats = null, sources = {}} = {}) {
     // listed twice is one sync, so the distinct tables decide how heavy it is.
     const uniq = [...new Set(f.tables)];
     const heavy = again.length > 0 || uniq.length >= 5;
+    // One or two tables synced on focus is the usual way to keep a screen's data fresh: a lead
+    // for a screen opened often, not a problem in itself (174 non-Acumatica solutions: 637 such).
+    const small = !heavy && !f.built && f.entities <= 2;
     const twice = uniq.filter(t => f.tables.filter(x => x === t).length > 1);
     const tables = uniq.length ? ` (${uniq.slice(0, 8).join(', ')}${uniq.length > 8 ? ', …' : ''}${twice.length ? `; ${twice.join(', ')} more than once` : ''})` : '';
     const what = syncers.length ? ` through ${syncers.join(', ')}` : '';
     add('heavy-focus', `$.jigs.${name}.onFocus`,
       `Opening the screen syncs ${f.entities} ${f.entities === 1 ? 'entity' : 'entities'}${tables}${what} every time, with no when: guard` +
       (again.length ? `; ${again.join(', ')} is the same sync the app runs on start.` : '.') +
-      (f.guarded.size ? ` Not counted: ${[...f.guarded].join(', ')}, which syncs only when its own when: holds.` : ''), heavy ? {priority: 'high'} : {});
+      (f.guarded.size ? ` Not counted: ${[...f.guarded].join(', ')}, which syncs only when its own when: holds.` : ''),
+      heavy ? {priority: 'high'} : small ? {priority: 'low'} : {});
   }
 
   // Expression scripts: JSONata for simple logic, JavaScript for what JSONata cannot express clearly.

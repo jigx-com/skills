@@ -544,6 +544,16 @@ test('a called action guarded by its own when: is not an unguarded focus sync; a
   assert.equal(home.priority, 'medium');
   // logSomething only returns true, so its when: always holds: the orders sync still runs on every focus.
   assert.match(focus.find(f => /orders/.test(f.where)).message, /syncs 1 entity \(orders\) through act-logged every time/);
+  // One or two tables on focus is the usual way to keep a screen fresh: low, not medium.
+  assert.equal(focus.find(f => /orders/.test(f.where)).priority, 'low');
+});
+
+test('entities built by an expression are named as such and never count as a small focus sync', () => {
+  const app = {jigs: {photos: {type: 'jig.default', onFocus: {type: 'action.sync-entities', options: {
+    provider: 'DATA_PROVIDER_REST', entities: '=$map(@ctx.datasources.files, function($v) {{"entity": "contentfile", "function": "get-file"}})'}}}}};
+  const focus = checkPerformance(app).findings.find(f => f.code === 'heavy-focus');
+  assert.match(focus.message, /\(built by an expression\)/);
+  assert.equal(focus.priority, 'medium');
 });
 
 test('event tables synced to start a table-change handler are read, and their handler needs no guard', () => {
@@ -571,4 +581,15 @@ test('the index DDL finding states no timing from another solution', () => {
   const ddl = checkPerformance(app).findings.find(f => f.code === 'ddl-invalidates-datasources');
   assert.ok(ddl);
   assert.doesNotMatch(ddl.message, /\d+(\.\d+)? s\b/);
+});
+
+test('a query with several OR lookups across keys is one finding (release/4 operation queue: 11 in one query)', () => {
+  const join = (t, a) => `JOIN ${t} ${a} ON (${a}.id = q.k OR json_extract(${a}.data, '$.ApptID') = q.k OR trim(json_extract(${a}.data, '$.Nbr')) = q.k)`;
+  const query = `SELECT q.id FROM queue q ${join('header', 'h')} ${join('orders', 'o')}`;
+  assert.equal(orAcrossKeys(query).length, 2);
+  const app = {datasources: {queue: ds(query, ['queue'])}};
+  const ors = checkPerformance(app).findings.filter(f => f.code === 'or-across-keys');
+  assert.equal(ors.length, 1);
+  assert.match(ors[0].message, /^2 OR lookups across keys, e\.g\./);
+  assert.equal(ors[0].priority, 'high');
 });
