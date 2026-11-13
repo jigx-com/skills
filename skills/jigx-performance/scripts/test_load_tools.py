@@ -615,6 +615,7 @@ class ProjectCentralRerunTest(unittest.TestCase):
         self.assertIn("Nothing has started and no sign-out seen", out.getvalue())
         self.assertIn("post-2: timeout (no sign-out seen and nothing started)", out.getvalue())
 
+    @unittest.skipUnless(hasattr(os.stat(os.curdir), "st_birthtime"), "needs a file creation time (macOS, where the iOS Simulator runs)")
     def test_first_sign_in_after_install(self):
         armed = int(time.time() * 1000) + 1000
         self.assertTrue(tl.first_sign_in_after_install(self.db, armed))  # the container was just created
