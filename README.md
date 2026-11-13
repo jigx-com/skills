@@ -2,10 +2,13 @@
 
 Installable AI skills for building Jigx solutions.
 
-This repository contains two separate skills:
+This repository contains three separate skills:
 
 - `jigx` - generic Jigx Core SDK app-building recipes.
 - `jigx-acumatica` - Acumatica-specific integration recipes for Jigx apps.
+- `jigx-performance` - audits a Jigx solution for sync and performance problems (a
+  prioritized report: what is wrong, where, the fix), times it in the iOS Simulator and
+  on Android, and measures fixes before and after.
 
 The skills are intentionally split so generic Jigx guidance can remain reusable while
 Acumatica conventions, endpoint rules, sync behavior, and ERP-specific payload shapes
@@ -16,33 +19,44 @@ stay isolated.
 Install these skills with the Vercel Labs `skills` CLI:
 
 ```sh
-npx skills add jigx-com/skills --skill jigx --skill jigx-acumatica --agent claude-code --agent codex --global
+npx skills add jigx-com/skills --skill jigx --skill jigx-acumatica --skill jigx-performance --agent claude-code --agent codex --global
 ```
 
 Use the non-interactive shorthand when scripting installs:
 
 ```sh
-npx skills add jigx-com/skills -s jigx -s jigx-acumatica -a claude-code -a codex -g -y
+npx skills add jigx-com/skills -s jigx -s jigx-acumatica -s jigx-performance -a claude-code -a codex -g -y
 ```
 
 If the repository is private or you prefer SSH, use the Git URL:
 
 ```sh
-npx skills add git@github.com:jigx-com/skills.git --skill jigx --skill jigx-acumatica --agent claude-code --agent codex --global
+npx skills add git@github.com:jigx-com/skills.git --skill jigx --skill jigx-acumatica --skill jigx-performance --agent claude-code --agent codex --global
 ```
+
+### Install From A Branch (Testing A PR)
+
+Name the branch after `#`; a branch name with a slash works this way, a GitHub
+`/tree/<branch>` URL does not:
+
+```sh
+npx skills add "jigx-com/skills#<branch>" --skill jigx-performance --agent claude-code --global --yes
+```
+
+Restart Claude Code afterwards so it loads the new version.
 
 ### Install For One Agent
 
 Claude Code only:
 
 ```sh
-npx skills add jigx-com/skills --skill jigx --skill jigx-acumatica --agent claude-code --global
+npx skills add jigx-com/skills --skill jigx --skill jigx-acumatica --skill jigx-performance --agent claude-code --global
 ```
 
 Codex only:
 
 ```sh
-npx skills add jigx-com/skills --skill jigx --skill jigx-acumatica --agent codex --global
+npx skills add jigx-com/skills --skill jigx --skill jigx-acumatica --skill jigx-performance --agent codex --global
 ```
 
 ### Project-Local Install
@@ -50,7 +64,7 @@ npx skills add jigx-com/skills --skill jigx --skill jigx-acumatica --agent codex
 Run this from the project repository when the skills should apply only to that project:
 
 ```sh
-npx skills add jigx-com/skills --skill jigx --skill jigx-acumatica --agent claude-code --agent codex
+npx skills add jigx-com/skills --skill jigx --skill jigx-acumatica --skill jigx-performance --agent claude-code --agent codex
 ```
 
 Project-local installs are useful when a repository needs pinned skill content checked
@@ -69,6 +83,7 @@ Update installed skills from this repository:
 ```sh
 npx skills update jigx
 npx skills update jigx-acumatica
+npx skills update jigx-performance
 ```
 
 Remove installed skills:
@@ -76,6 +91,7 @@ Remove installed skills:
 ```sh
 npx skills remove jigx
 npx skills remove jigx-acumatica
+npx skills remove jigx-performance
 ```
 
 ## Install Locations
@@ -99,6 +115,33 @@ Use `jigx-acumatica` together with `jigx` when the app integrates with Acumatica
 REST/OData functions, `acuerp` tokens, `acumaticaURL` casing, lookup expands,
 local-first sync, command queue retry, file upload, PDF attachment, and service order
 submission patterns.
+
+Use `jigx-performance` when a Jigx app is slow, and before merging changes to a
+solution. It loads on its own when you write queries, indexes or lists.
+
+## Check a solution's performance
+
+Open the solution in Claude Code (a YAML folder with `index.jigx`, or a TypeScript SDK
+project) and type one of these:
+
+| Type | What happens | Needs |
+| --- | --- | --- |
+| `/jigx-performance audit` | **Code check**: what is wrong, where and the fix, by priority, in seconds; then it stops | Node 18+ (and Ruby for YAML) |
+| `/jigx-performance` | **Review**: the code check, then: **time it and fix it** (sync, queries, actions and screens timed in the iOS Simulator and on Android, fixes you approve, timed again and compared), **fix the high findings now**, or **stop** | for timing, a simulator or emulator; Claude helps set it up |
+
+Nothing is written into your repo, and fixes go on a new branch only after you approve
+them.
+
+Before a PR into the solution's main branch, check the branch adds no new high
+findings (run it from anywhere in the solution repo):
+
+```sh
+node ~/.claude/skills/jigx-performance/scripts/pr-check.mjs --base origin/main --report perf-check.md
+```
+
+[`skills/jigx-performance/USAGE.md`](skills/jigx-performance/USAGE.md) has the rest:
+the pre-PR steps and a CI job, how to read the report, findings you can accept, what
+each check and timing measures, and every script.
 
 ## Verify generated solutions
 
